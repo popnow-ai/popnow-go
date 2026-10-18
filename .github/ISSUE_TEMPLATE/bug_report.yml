@@ -1,0 +1,34 @@
+name: Bug report
+description: Something in the Go SDK does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Never paste your API key (`sk-popnow-...`) or webhook secret.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal code to reproduce
+      render: go
+    validations:
+      required: true
+  - type: input
+    id: request-id
+    attributes:
+      label: request_id
+      description: From the error (`apiErr.RequestID`) or the response, if you have one.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`popnow.Version` and the output of `go version`."
+    validations:
+      required: true

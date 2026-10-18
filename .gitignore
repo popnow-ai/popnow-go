@@ -1,0 +1,12 @@
+# Go
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Local metadata (not part of the module)
+REPO_META.json

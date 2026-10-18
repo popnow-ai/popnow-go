@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an improvement to the Go SDK.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The use case, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed API
+      description: How you would like the code to look.
+      render: go
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

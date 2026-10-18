@@ -1,0 +1,3720 @@
+openapi: 3.1.0
+info:
+  title: PopNow API
+  version: 1.0.0
+  description: |
+    Contract for the PopNow developer API (`https://api.popnow.ai/api/v1`).
+    
+    Generate images, video and audio with the same models, prices and credit wallet as popnow.ai. Every
+    operation requires a Bearer API key created in the developer console (https://popnow.ai/api/console).
+    Every JSON response uses the `{code,msg,data,request_id}` envelope. A successful HTTP response has
+    `code: 200`; asynchronous task success or failure is expressed by `data.state`, not by the envelope code.
+    
+    Billing: 1 credit = $0.01. API calls and generations on the website use the same wallet and the same price.
+    Amounts are returned both as integer credits (`maxCredits`, `estimatedCredits`, `credits`…) and as the
+    equivalent USD decimal string (`maxCharge`, `estimatedCost`, `cost`…).
+    
+    The `/v1` operations tagged `OpenAI Compatible` are the one documented exception to the envelope: they
+    return OpenAI response and error objects so the official SDKs work by changing only `base_url`.
+    
+    Error text language: `msg`, task `errorMessage` and the compatible layer's `error.message` are English by
+    default. Send `Accept-Language` (`en`, `zh-CN`, `zh-TW`, `ja`, `ko`, `de`, `fr`, `es`, `pt-BR`, `ru`, `it`, `pl`;
+    regional variants such as `de-DE` match their language) to choose another language for one request, or set the
+    account's API error language in the console; a recognized header takes precedence. Webhooks follow the account
+    setting. Codes (`code`, `errorCode`, OpenAI `type` / `code`) never change with the language, so branch on codes,
+    not on text. When a generation fails for a reason reported by the model, task `errorMessage` carries that
+    reason in English (not translated), with internal identifiers and account details removed.
+servers:
+  - url: https://api.popnow.ai
+    description: Production
+tags:
+  - name: Tasks
+  - name: Models
+  - name: Account
+  - name: Media
+  - name: Assets
+    description: Long-term private asset library. Saved files are kept until you delete them and are referenced as popnow://a/<id> in generation requests made with keys of the same workspace. A personal key reaches your personal library; a team workspace key reaches that team's shared library. Only short private previews are ever returned; there are no public links. Storage unlocks with the account owner's lifetime credit purchases.
+  - name: OpenAI Compatible
+    description: "OpenAI Videos protocol shell under `/v1` (create, retrieve and download a video) and the OpenAI model list. It shares API keys, limits, validation and billing with `/api/v1` but uses the OpenAI request, response and error shapes. Send the key as `Authorization: Bearer <key>`. Keys in the URL query string are never accepted."
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/jobs/quote:
+    post:
+      tags:
+        - Tasks
+      operationId: quoteTask
+      summary: Quote a task before reserving funds
+      description: |
+        Validates the same model input and admission rules as task creation,
+        without creating a task, reserving credits or starting generation.
+        The signed quote is bound to this account, API key and request and is
+        valid for five minutes. Pass `quoteId` and `expectedCredits` (or `expectedCost`) with the same request to
+        createTask to make sure the price you showed is the price that is held. New acceptance rejects an expired
+        or changed quote with business code 40901. A replay of an already
+        accepted Idempotency-Key still returns the original task.
+        A quote does not reserve capacity or guarantee future availability.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+      responses:
+        "200":
+          description: Customer price and maximum charge; no funds were reserved.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskQuoteEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/jobs/createTask:
+    post:
+      tags:
+        - Tasks
+      operationId: createTask
+      summary: Create an asynchronous generation task
+      description: |
+        Validates the model input, reserves the estimated charge, chooses an
+        available deployment, and creates a task in `queued` state. HTTP 202
+        means the task was accepted; it does not mean generation has completed.
+        
+        An `Idempotency-Key` is optional but strongly recommended. For the same
+        account **and the same API key**, repeating a key with the same normalized
+        model, input, and callback URL within 24 hours returns the
+        original task and does not reserve funds twice. A sibling API key cannot
+        replay the mapping: it receives `409 Conflict` without the original task
+        ID. Reusing the key with different request semantics also returns
+        `409 Conflict`. Callbacks are optional and are validated against
+        private/loopback destinations before acceptance.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/PopNowRetention"
+        - name: wait
+          in: query
+          required: false
+          description: |
+            Seconds to hold the connection open waiting for the task to reach a
+            terminal state, so you do not have to write a polling loop for the
+            first call. Values above 60 are clamped to 60; anything that is not a
+            positive integer is ignored rather than rejected, because a typo in an
+            optimisation parameter should not fail a generation that would
+            otherwise succeed.
+            
+            Reaching a terminal state within the budget returns `200` with the
+            same task record `recordInfo` returns. Running out of budget returns
+            the ordinary `202` — identical to omitting `wait` — and you poll from
+            there. Disconnecting stops the wait and nothing else: the task keeps
+            running and is billed as usual.
+            
+            The ceiling stays well under the 100-second edge timeout on purpose.
+            Past that line the connection is cut by the CDN rather than by us, and
+            the caller gets a `524` carrying neither the task ID nor any resumable
+            state — while the task exists and the funds are already held.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 60
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateTaskRequest"
+      responses:
+        "200":
+          description: "Returned only when `wait` was supplied and the task reached a terminal state inside that budget. The body is the task record, identical in shape to `recordInfo`. A terminal state is not necessarily a success - check `data.state`."
+          headers:
+            Cache-Control:
+              description: Task records contain caller-specific state and must not be cached.
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRecordEnvelope"
+        "202":
+          description: A newly accepted task is returned in `queued` state. A same-key idempotent replay returns the original task in its current state and does not create another hold. The hold is not a charge.
+          headers:
+            Location:
+              description: Relative URL of the task status resource.
+              schema:
+                type: string
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+            Cache-Control:
+              description: Task submissions contain caller-specific state and must not be cached.
+              schema:
+                type: string
+                const: no-store
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateTaskEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+      callbacks:
+        onTaskTerminal:
+          "{$request.body#/callBackUrl}":
+            post:
+              summary: Deliver a terminal task record
+              description: |
+                Sent only when `callBackUrl` was supplied. The body is the same envelope and task
+                record returned by `recordInfo` (payload version 2).
+                
+                Verify `X-Webhook-Signature` over `taskId.timestamp.sha256(raw_body)` with HMAC-SHA256 and the
+                account webhook key (developer console), taking `taskId` from `data.taskId`, then
+                compare the Base64-encoded result in constant time.
+                Reject stale timestamps. A delivery may be retried and receivers
+                must be idempotent; `request_id` is the stable delivery ID.
+                The request carries `User-Agent: PopNow-Webhook/1`.
+              parameters:
+                - name: X-Webhook-Timestamp
+                  in: header
+                  required: true
+                  schema:
+                    type: string
+                    pattern: ^[0-9]+$
+                  description: Unix timestamp used by the signature.
+                - name: X-Webhook-Signature
+                  in: header
+                  required: true
+                  schema:
+                    type: string
+                  description: Base64-encoded HMAC-SHA256 signature.
+                - name: X-Webhook-Payload-Version
+                  in: header
+                  required: true
+                  schema:
+                    type: integer
+                    const: 2
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/TaskRecordEnvelope"
+              responses:
+                "200":
+                  description: Any 2xx response acknowledges delivery.
+  /api/v1/jobs/recordInfo:
+    get:
+      tags:
+        - Tasks
+      operationId: recordInfo
+      summary: Get a task created by the authenticated API key
+      parameters:
+        - name: taskId
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Current task record. Terminal and non-terminal states share this shape.
+          headers:
+            Cache-Control:
+              description: Task state is caller-specific and changes asynchronously.
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskRecordEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Task does not exist or belongs to another account or API key; these cases are indistinguishable.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/jobs/retry:
+    post:
+      tags:
+        - Tasks
+      operationId: retryTask
+      summary: Create a new task from a failed or expired task
+      description: |
+        The source terminal task is never modified. Current model schema,
+        pricing, permissions, balance, and availability are evaluated again. An
+        optional Idempotency-Key is scoped to the source task and retry action.
+        The source task must have been created by the same API key; unknown,
+        cross-account, and same-account cross-key task IDs all return 404.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskActionRequest"
+      responses:
+        "200":
+          description: A newly created retry task is returned in `queued` state. An idempotent replay returns that retry task in its current state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetryTaskEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/jobs/purge:
+    post:
+      tags:
+        - Tasks
+      operationId: purgeTask
+      summary: Destroy the stored content of a finished task
+      description: |
+        Removes the task's generated media objects, its result payload, and the
+        stored request text including the prompt.
+        
+        **Billing evidence is never touched.** The ledger, the charged amount,
+        the model identifier, the state, the timestamps and the request_id all
+        remain, so the task stays fully auditable in billing. What is destroyed
+        is the content, not the spend record; the response repeats this as
+        `billingRetained`.
+        
+        Only a finished task can be destroyed; a task that is still queued or
+        running returns 400. Its outputs have not landed yet, and removing half
+        of them is worse than removing none. An accepted generation task cannot
+        be stopped, so the only thing to do is wait for it to reach a terminal
+        state and call this endpoint then.
+        
+        The call is idempotent by `taskId`: destroying an already destroyed task
+        returns 200 with the original `purgedAt`, so a client may safely retry
+        after a timeout. This endpoint does not read an `Idempotency-Key` header;
+        the `taskId` itself is the idempotency key.
+        
+        Media objects are removed by a background sweep within about a minute,
+        so `mediaDeletionPending` can be true while `contentState` is already
+        `purged`. Deleting them inline would let one undeletable object block the
+        whole request.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskActionRequest"
+      responses:
+        "200":
+          description: Content destroyed, or already destroyed by an earlier call.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TaskPurgeEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/models:
+    get:
+      tags:
+        - Models
+      operationId: listModels
+      summary: List callable models and their credit prices
+      description: |
+        Returns every image, video and audio model your key can call, without pagination, with
+        its price in credits (`credits`, the same price popnow.ai shows). Text models are not part of the API.
+        The server sends `Cache-Control: private, max-age=60`.
+      parameters:
+        - name: modality
+          in: query
+          schema:
+            type: string
+            enum:
+              - image
+              - video
+              - audio
+        - name: provider
+          in: query
+          schema:
+            type: string
+          description: Exact model creator/author identifier, such as the research lab that built the model.
+        - name: task
+          in: query
+          schema:
+            type: string
+          description: "Exact supported task, for example `text-to-image`. Image editing accepts either spelling: `edit` (the published call suffix) and `image-to-image` (the value returned in `tasks`) select the same endpoints."
+        - name: search
+          in: query
+          schema:
+            type: string
+            maxLength: 128
+        - name: includeSchema
+          in: query
+          schema:
+            oneOf:
+              - type: boolean
+              - type: integer
+                enum:
+                  - 0
+                  - 1
+          description: Include each model's input JSON Schema when `true` or `1`.
+        - name: includeExamples
+          in: query
+          schema:
+            oneOf:
+              - type: boolean
+              - type: integer
+                enum:
+                  - 0
+                  - 1
+          description: Include validated example inputs when `true` or `1`.
+      responses:
+        "200":
+          description: Model list.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: private, max-age=60
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelListEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/models/{model}:
+    get:
+      tags:
+        - Models
+      operationId: getModel
+      summary: Get one model, including its input JSON Schema
+      description: |
+        `model` is the exact value used by `createTask.model` and may contain
+        slashes. URL-encode embedded slashes when using clients that treat path
+        parameters as one segment (for example `family%2Fversion%2Ftask`).
+      parameters:
+        - name: model
+          in: path
+          required: true
+          allowReserved: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Complete model record.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: private, max-age=60
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ModelEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/jobs:
+    get:
+      tags:
+        - Tasks
+      operationId: listTasks
+      summary: List task history for the authenticated API key
+      description: |
+        Returns only visible tasks created by this API key, newest first by
+        createdAt and taskId. Scope is this API key: tasks created by other keys on the same account, and generations started directly in the web console (which use no API key), are not included. For an account-wide view, use the console's usage page. The list contains metadata only;
+        use recordInfo for a selected task's result. No input, output, signed
+        media URL, or internal processing detail is included.
+        Dates form a UTC half-open interval [from,to), up to 92 days.
+        Default to is tomorrow in UTC; omitted from is seven days before to.
+        Keep all filters, including explicit from/to dates, unchanged while
+        paginating with nextCursor. Pages read live state, not a frozen snapshot.
+        Unknown, duplicate, or empty query parameters are rejected. Queries
+        have a five-second server budget and return 503 on timeout.
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Inclusive UTC date in YYYY-MM-DD format.
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Exclusive UTC date in YYYY-MM-DD format.
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum:
+              - queued
+              - running
+              - succeeded
+              - failed
+              - canceled
+              - expired
+        - name: model
+          in: query
+          schema:
+            type: string
+          description: Exact catalog model identifier or a declared alias.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          schema:
+            type: string
+          description: Opaque nextCursor from the previous page; do not construct it yourself.
+      responses:
+        "200":
+          description: Current-key task summaries without prompt or result payloads.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeyTaskListEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/usage:
+    get:
+      tags:
+        - Account
+      operationId: getUsage
+      summary: Get usage for the authenticated API key
+      description: |
+        Scope is this API key: tasks created by other keys on the same account, and generations started directly in the web console (which use no API key), are not included. For an account-wide view, use the console's usage page.
+        Hidden historical tasks of this key are included. Other keys and
+        workspaces cannot be selected. Unknown or repeated query parameters
+        are rejected.
+        Dates form a UTC half-open interval [from,to), up to 92 days.
+        The default to is tomorrow in UTC; omitted from is seven days before to.
+        Calls are attributed to task creation time. Spend sums only settled
+        actual charges for those tasks, never pending holds. Late settlement
+        can change a previous day's spend. These are task usage totals, not
+        a statement of cash movements or remaining API-key budget.
+        An additional account-wide token bucket allows a burst of 30 requests
+        and replenishes 30 tokens per minute, shared by all keys on the account.
+        Observe Retry-After on 429. This reporting limit fails closed when its
+        limiter is unavailable. Queries have a five-second server budget;
+        a timeout returns 503 and suggests retrying a shorter date range.
+      parameters:
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Inclusive UTC date in YYYY-MM-DD format.
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Exclusive UTC date in YYYY-MM-DD format.
+      responses:
+        "200":
+          description: Current-key usage with exact USD decimal strings and sparse daily/model buckets.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/RateLimitLimit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/RateLimitRemaining"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/APIKeyUsageEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/chat/credit:
+    get:
+      tags:
+        - Account
+      operationId: getCreditBalance
+      summary: Get net balance, promotional grants, and approved credit
+      responses:
+        "200":
+          description: Net available, held, and total balances plus funding sources in USD decimal strings. Unused credit is separate from wallet funds; model-scoped grants may not pay for every request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/common/upload-url:
+    post:
+      tags:
+        - Media
+      operationId: createUploadUrl
+      summary: Create a presigned image upload ticket
+      description: |
+        The server generates the object key. Upload the exact declared number of
+        bytes with PUT and copy every returned header. Supported media types are
+        JPEG, PNG, WebP and GIF images (10 MiB), or MP4/WebM video and
+        MP3/WAV audio (90 MiB, at most 600 seconds). Audio/video commit verifies
+        format and measurable duration; it does not apply a platform content filter.
+        LoRA weights are uploaded as `application/octet-stream` (a `.safetensors`
+        file, up to 2 GiB; the ticket stays valid for 2 hours); commit checks that it
+        is a complete safetensors file, and the returned URI goes in `loras[].path`.
+        After PUT, call the file commit endpoint and use its popnow:// URI in task input.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UploadURLRequest"
+      responses:
+        "200":
+          description: Presigned upload ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UploadURLEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/files/{fileId}/commit:
+    post:
+      tags:
+        - Media
+      operationId: commitUploadedFile
+      summary: Commit a completed direct upload
+      description: |
+        Compares the stored byte count and media type with the ticket, checks
+        the image signature, computes SHA-256, and copies the temporary object
+        to an immutable private key. Reference this uploaded file with the returned
+        popnow:// URI. Publicly accessible HTTPS media URLs can instead be passed
+        directly in supported model input fields, without uploading. Repeating
+        a successful commit is idempotent.
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: ^fil_
+      responses:
+        "200":
+          description: Ready tenant-scoped file reference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileCommitEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/files/import:
+    post:
+      tags:
+        - Media
+      operationId: importLoraFile
+      summary: Import a LoRA weights file from a link
+      description: |
+        Downloads a `.safetensors` LoRA file once and stores it as your upload, so a
+        file that needs a sign-in can still be used without making it public. `url`
+        accepts a Hugging Face repo id (`owner/repo`, when the repo has exactly one
+        `.safetensors` file), a Hugging Face repo or file page, or any direct https
+        link. `token` is optional: a Hugging Face access token, or a Civitai API key,
+        used only for this download and never stored. The response matches the
+        commit endpoint; put its popnow:// URI in `loras[].path`. Imported files are
+        kept for the same time as other uploads. Public links can also be passed to
+        `loras[].path` directly, without importing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoraImportRequest"
+      responses:
+        "200":
+          description: Ready tenant-scoped file reference.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FileCommitEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/common/download-url:
+    post:
+      tags:
+        - Media
+      operationId: createDownloadUrl
+      summary: Create a short-lived task output download URL
+      description: |
+        The server verifies both task ownership and that the requested key is an
+        output of that task. Leave `key` empty to select the first output.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DownloadURLRequest"
+      responses:
+        "200":
+          description: Short-lived download ticket.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DownloadURLEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/assets:
+    get:
+      tags:
+        - Assets
+      operationId: listAssets
+      summary: List your saved assets
+      description: |
+        Returns the ready assets of the key's library, one page at a time. Pass
+        the previous page's `nextCursor` as `cursor` to continue; it is absent on
+        the last page, and a cursor only works with the `sort` it came from.
+        Filter with `kind`, `source` (comma-separated), `favorite`, `collectionId`
+        (one collection of the key's library; collections are created and edited in
+        the console, and an id outside this library returns 404), `entityId` (the
+        images of one character) and a case-insensitive name search in `q`.
+        Order with `sort`: `recent` (default, newest first), `oldest`, `name`
+        (case-insensitive A to Z) or `size` (largest first).
+        
+        Every item carries a stable `uri` (`popnow://a/<id>`) and a private
+        `previewUrl` signed for at most 20 minutes. The `uri` works only in
+        generation requests made with keys of the same workspace (any media field
+        of a model input); nothing in this API returns a permanent or publicly
+        reachable link, so the asset library cannot be used as file hosting.
+        Responses are `private, no-store`. Listing and reading assets is limited
+        to 60 requests per minute per account.
+        
+        The key decides the library: a key created in your personal workspace
+        reaches your personal library, and a key created in a team workspace
+        (by any member) reaches that team's shared library. A team key never
+        reaches anyone's personal library. What a team key may change follows
+        the current role of the member who created it: owner and admin can save,
+        rename and delete anything; developer can save and rename or delete only
+        what they saved; billing and readonly can only read and use assets. If
+        that member has left the team the key gets 403 with `data.reason`
+        `asset_workspace_forbidden`.
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - image
+              - video
+              - audio
+        - name: source
+          in: query
+          required: false
+          description: Comma-separated list of task_output, upload and url.
+          schema:
+            type: string
+        - name: q
+          in: query
+          required: false
+          description: Case-insensitive substring of the asset name.
+          schema:
+            type: string
+            maxLength: 80
+        - name: favorite
+          in: query
+          required: false
+          description: Only favorites (true) or only assets that are not favorites (false).
+          schema:
+            type: boolean
+        - name: collectionId
+          in: query
+          required: false
+          description: Only assets in this collection of the same library (404 when it is not one).
+          schema:
+            type: string
+            maxLength: 40
+        - name: entityId
+          in: query
+          required: false
+          description: Only the images of this character in the same library; an unknown id returns an empty page.
+          schema:
+            type: string
+            maxLength: 40
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - recent
+              - oldest
+              - name
+              - size
+            default: recent
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          description: One page of assets.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: private, no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetListEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+    post:
+      tags:
+        - Assets
+      operationId: createAsset
+      summary: Save a file to your asset library
+      description: |
+        Copies a file into the key's library (your personal library, or the
+        team's shared library for a team key), where it is kept until it is
+        deleted, the owner closes the account or the team is deleted. Choose one
+        source:
+        
+        - `source: task_output` with `taskId` and either the output `key` or its
+          zero-based `index` (the order of `output.assets` in `recordInfo`). The
+          task must be one of your own successful tasks; with a team key, a task
+          of that team.
+        - `source: upload` with the `fileId` of a committed upload.
+        - `source: url` with a public `http` or `https` address on port 80 or 443,
+          without a username or password. The whole file is downloaded once
+          through a fetcher that refuses private and internal addresses, and its
+          type is read from the file itself: only JPEG, PNG, WebP and GIF images,
+          MP4 and WebM video, and MP3, WAV, FLAC and Ogg audio are accepted.
+          Links to PopNow storage are refused; save those with `task_output` or
+          `upload` instead.
+        
+        `Idempotency-Key` is required and bound to the request for 24 hours.
+        Saving the same source again returns the existing asset without using
+        more space. Dimensions and durations are measured by the server.
+        
+        Storage unlocks with the owner's lifetime top-ups (see
+        `GET /api/v1/assets/usage`); the owner's personal library and all of
+        their team libraries share one allowance. Without any top-up, saving
+        returns 400 (`data.reason` `asset_library_locked`) explaining how much to
+        top up. A full allowance (`asset_library_full`) or a file above the
+        plan's per-file limit (`asset_file_too_large`) also returns 400 naming the
+        plan and what the next plan unlocks; for team members who cannot top up,
+        the message asks the team owner to upgrade instead of naming an amount.
+        Lowering a plan never deletes saved assets. Saving is limited to 30
+        requests per minute and a daily number of new assets per allowance (429
+        with `Retry-After` until 00:00 UTC, `asset_daily_limit`). If storage is
+        full across the platform the request returns 503 (`asset_storage_full`).
+        A team role that cannot save gets 403 (`asset_permission_denied`).
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AssetCreateRequest"
+      responses:
+        "200":
+          description: The saved (or already saved) asset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+  /api/v1/assets/usage:
+    get:
+      tags:
+        - Assets
+      operationId: getAssetUsage
+      summary: Get your asset library plan, usage and limits
+      description: |
+        Plans unlock automatically with the owner's lifetime top-ups and never
+        go down. Returns the current plan, how much is stored, its limits, the
+        next plan and how much more to top up to reach it, the full plan table,
+        and how many assets were created today against the daily limit. Usage
+        and limits cover the owner's whole allowance: the personal library plus
+        every team library they own. A plan with all limits at 0 cannot save new
+        assets; assets already saved stay usable. Byte values use binary units
+        (500 MB = 524288000 bytes).
+        
+        `scope` tells which library the key reaches and what it may do there.
+        When `scope.canTopUp` is false (a team key whose creator is not the
+        team owner, billing members included), `lifetimeTopupUsd` and
+        `topupToNextTierUsd` are omitted.
+      responses:
+        "200":
+          description: Plan, usage and limits.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: private, no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetQuotaEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/assets/{assetId}:
+    parameters:
+      - name: assetId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^ast_
+    get:
+      tags:
+        - Assets
+      operationId: getAsset
+      summary: Get one asset with a fresh private preview
+      description: The `previewUrl` is signed for at most 20 minutes; persist `uri`, not the preview. An unknown asset, another account's asset and an asset in a library this key does not reach return the same 404.
+      responses:
+        "200":
+          description: The asset.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: private, no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    patch:
+      tags:
+        - Assets
+      operationId: renameAsset
+      summary: Rename an asset or mark it as a favorite
+      description: Send `name`, `favorite` or both; only what you send changes, and a body with neither is rejected as an invalid name. The `uri` stays the same and nothing is copied. Favorites belong to the library, so everyone in a team sees the same ones. Repeating the same request is safe, so no Idempotency-Key is needed. In a team library, billing and readonly members cannot rename or change favorites, and developers can do so only for assets they saved (403, `data.reason` `asset_permission_denied`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 80
+                favorite:
+                  type: boolean
+      responses:
+        "200":
+          description: The renamed asset.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      tags:
+        - Assets
+      operationId: deleteAsset
+      summary: Delete an asset
+      description: |
+        The asset disappears immediately (it is also removed from every
+        collection) and its `uri` stops working in new requests; the stored file
+        is then deleted. Deleting an unknown or
+        already deleted asset, or one in a library this key does not reach,
+        returns the same result, so retries are safe and no Idempotency-Key is
+        needed. Deleting does not reset the daily limit on new assets. In a team
+        library, billing and readonly members cannot delete, and developers can
+        delete only assets they saved (403, `data.reason`
+        `asset_permission_denied`).
+      responses:
+        "200":
+          description: Deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetDeletedEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/assets/entities:
+    get:
+      tags:
+        - Assets
+      operationId: listAssetCharacters
+      summary: List the characters in your asset library
+      description: |
+        A character is a named set of images saved in the same library, kept in
+        the order arranged in the console. It references those assets instead of
+        copying them: deleting a character never deletes its images, and deleting
+        an image removes it from every character. Characters are created and
+        edited in the console; this API only reads them.
+        
+        The key decides the library exactly as for `GET /api/v1/assets`. Each
+        image is an asset with its stable `uri` (`popnow://a/<id>`), usable in
+        generation requests made with keys of the same workspace, and a private
+        `previewUrl` signed for at most 20 minutes. `cover` is the cover image
+        (null while the character has no images).
+        
+        Newest first, one page at a time: pass the previous page's `nextCursor`
+        as `cursor`. Pass `assetId` to list only the characters that contain that
+        asset. Responses are `private, no-store`; reading characters shares the
+        limit of 60 requests per minute per account with reading assets.
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          description: Only character exists today; omitting it means character.
+          schema:
+            type: string
+            enum:
+              - character
+        - name: assetId
+          in: query
+          required: false
+          description: Only characters that contain this asset.
+          schema:
+            type: string
+            maxLength: 40
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: One page of characters.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: private, no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetEntityListEnvelope"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/assets/entities/{entityId}:
+    parameters:
+      - name: entityId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 40
+    get:
+      tags:
+        - Assets
+      operationId: getAssetCharacter
+      summary: Get one character with its images in order
+      description: An unknown character, another account's character and one in a library this key does not reach return the same 404. Each image carries a fresh private `previewUrl`; persist the `uri` values, not the previews.
+      responses:
+        "200":
+          description: The character.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: private, no-store
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AssetEntityEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /v1/models:
+    get:
+      tags:
+        - OpenAI Compatible
+      operationId: listOpenAIModels
+      summary: List callable models in the OpenAI `model` list shape
+      description: |
+        Returns every model that can be called right now. `id` is the model call name
+        accepted by every `/v1` and `/api/v1` operation; `owned_by` is the model publisher.
+        Prices are not included; use `/api/v1/models`.
+        
+        Besides the four OpenAI fields, every item carries `modality` and `task`. OpenAI SDKs ignore the extra fields.
+        Only video models work on `POST /v1/videos`.
+      parameters:
+        - name: modality
+          in: query
+          required: false
+          description: Only list models with this output modality. An unknown value returns `400` with `param` set to `modality`.
+          schema:
+            type: string
+            enum:
+              - image
+              - video
+              - audio
+      responses:
+        "200":
+          description: OpenAI-style model list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OpenAIModelList"
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "403":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "500":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
+  /v1/videos:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: createVideo
+      summary: Create a video generation task in the OpenAI Videos shape
+      description: |
+        Projection of `createTask` onto the OpenAI Videos API. `model` must be
+        a video endpoint identifier from `/v1/models`. `prompt` maps to the
+        model's `prompt`; `input_reference` (an HTTPS URL or a committed
+        `popnow://` upload) maps to `image_url` / `image_urls`; `seconds` maps to
+        `duration_seconds`; `size` (`WIDTHxHEIGHT`) maps to `resolution` and/or
+        `aspect_ratio`, or to `width` / `height` when the model declares pixel
+        dimensions. A parameter the selected model does not declare is
+        rejected with `400`. The same hold and idempotency rules as
+        `createTask` apply; the returned object never contains prices.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VideoCreateRequest"
+      responses:
+        "200":
+          description: The accepted task as a `video` object in `queued` state (an idempotent replay reports the current state).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Video"
+        "400":
+          $ref: "#/components/responses/OpenAIError"
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "402":
+          $ref: "#/components/responses/OpenAIError"
+        "403":
+          $ref: "#/components/responses/OpenAIError"
+        "404":
+          $ref: "#/components/responses/OpenAIError"
+        "409":
+          $ref: "#/components/responses/OpenAIError"
+        "413":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "500":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
+  /v1/videos/{videoId}:
+    get:
+      tags:
+        - OpenAI Compatible
+      operationId: retrieveVideo
+      summary: Retrieve a video task as an OpenAI `video` object
+      description: |
+        Task states map to `queued` → `queued`, `running` → `in_progress`,
+        `succeeded` → `completed`, and `failed` / `canceled` / `expired` →
+        `failed` with an `error` object. Only the account and API key that
+        created the task can read it; other identifiers return `404`.
+      parameters:
+        - name: videoId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current video task state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Video"
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "403":
+          $ref: "#/components/responses/OpenAIError"
+        "404":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "500":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
+  /v1/videos/{videoId}/content:
+    get:
+      tags:
+        - OpenAI Compatible
+      operationId: downloadVideoContent
+      summary: Redirect to the generated video file
+      description: |
+        Responds `302 Found` with a short-lived signed download URL for the
+        task's primary output, the same address `/api/v1/common/download-url`
+        would issue. `409` while the task is still queued or running; `404`
+        when the task failed or has no downloadable output.
+      parameters:
+        - name: videoId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "302":
+          description: Redirect to the signed media URL. The redirect must not be cached.
+          headers:
+            Location:
+              description: Short-lived signed download URL.
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "403":
+          $ref: "#/components/responses/OpenAIError"
+        "404":
+          $ref: "#/components/responses/OpenAIError"
+        "409":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "500":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: sk-popnow-<48 lowercase hex characters>
+      description: "Send `Authorization: Bearer sk-popnow-...`. Create keys in the developer console at https://popnow.ai/api/console and keep them server-side."
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Stable key for one logical task submission; retained for 24 hours per account and bound to both the submitting API key and normalized request fingerprint. A sibling key receives 409 without the original task ID.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    PopNowRetention:
+      name: X-PopNow-Retention
+      in: header
+      required: false
+      description: |-
+        Retention for this one task, in whole seconds. It applies to both the generated outputs and the stored request text. The effective value is always `min(header, account setting, platform maximum)`: a request can only shorten retention, never extend it.
+        `0` is valid and means the outputs are removed as soon as the task reaches a terminal state. Values that cannot be applied never fail the request: a negative number is clamped to `0`, a value above the ceiling is clamped to the ceiling, and a value that is not a decimal integer is ignored so the account setting applies. The effective result is always reported back in `retention` on the task record.
+        Accepted by `createTask`. `retry` inherits the source task's effective value and ignores this header, so one task family never ends up with two different expiry times. `quote` does not accept it because it does not create a task.
+      schema:
+        type: string
+        pattern: ^-?[0-9]+$
+  headers:
+    RateLimitLimit:
+      description: Capacity of the active account-level rate-limit window.
+      schema:
+        type: integer
+    RateLimitRemaining:
+      description: Remaining requests in the active window.
+      schema:
+        type: integer
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+        minimum: 1
+  responses:
+    BadRequest:
+      description: Invalid JSON, query, callback URL, model input, or media declaration. Invalid callBackUrl values return code 400 and msg "Invalid callback URL" with request_id. Submitted hosts, IP addresses, and DNS diagnostics are not echoed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: Missing, malformed, expired, revoked, or otherwise invalid API key.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    PaymentRequired:
+      description: Insufficient balance (`40201`) or a spend cap was reached (`40202`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Account, model, API-key, IP, or region authorization failed.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Resource does not exist or is not visible to this account and API key. These cases are intentionally indistinguishable.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Conflict:
+      description: Idempotency or media-transfer state conflicts with this request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    PayloadTooLarge:
+      description: Request body exceeds the server's accepted size limit.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: Account-level request limit exceeded.
+      headers:
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/RateLimitLimit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/RateLimitRemaining"
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    ServerError:
+      description: Internal failure. Details are not exposed; report `request_id` to support.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unavailable:
+      description: "HTTP 503 carries one of three business codes. `50301`: no usable deployment or effective customer price exists for the selected model. `503`: a dependency is temporarily unavailable; retry after the `Retry-After` header when it is present. `50302`: a synchronous generation failed upstream and the charge was refunded. Nothing was charged, but send the retry with a **new** `Idempotency-Key`: reusing the original one replays the recorded failure instead of generating again."
+      headers:
+        Retry-After:
+          $ref: "#/components/headers/RetryAfter"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    OpenAIError:
+      description: "Error in the OpenAI `{error:{message,type,param,code}}` shape. The HTTP status is the same one `/api/v1` would return. A content-policy refusal is HTTP 400 with `code: content_rejected`, so it can be told apart from a parameter error (`invalid_request` / `unsupported_parameter`, with `param` set when the error is about one field)."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/OpenAIErrorBody"
+  schemas:
+    FundingGrantItem:
+      type: object
+      required:
+        - id
+        - name
+        - amountUsd
+        - availableUsd
+        - heldUsd
+        - spentUsd
+        - status
+        - startsAt
+        - modelSlugs
+        - customerMemo
+        - createdAt
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        amountUsd:
+          type: string
+        availableUsd:
+          type: string
+        heldUsd:
+          type: string
+        spentUsd:
+          type: string
+        status:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        modelSlugs:
+          type: array
+          items:
+            type: string
+          description: Empty means all models.
+        customerMemo:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    CreditFacilityItem:
+      type: object
+      required:
+        - enabled
+        - limitUsd
+        - availableUsd
+        - usedUsd
+        - heldUsd
+        - status
+        - version
+      properties:
+        enabled:
+          type: boolean
+        limitUsd:
+          type: string
+          description: Approved ceiling, not wallet funds.
+        availableUsd:
+          type: string
+        usedUsd:
+          type: string
+          description: Outstanding settled principal.
+        heldUsd:
+          type: string
+          description: Credit reserved for accepted tasks.
+        expiresAt:
+          type:
+            - string
+            - "null"
+          format: date-time
+        status:
+          type: string
+        version:
+          type: integer
+          format: int64
+    FundingOverview:
+      type: object
+      required:
+        - balanceUsd
+        - heldUsd
+        - prepaidAvailableUsd
+        - grantAvailableUsd
+        - cashShortfallUsd
+        - credit
+        - grants
+        - grantsHasMore
+      properties:
+        balanceUsd:
+          type: string
+          description: Net wallet available balance; may be negative for approved credit consumption or external payment recovery.
+        heldUsd:
+          type: string
+        prepaidAvailableUsd:
+          type: string
+          description: Unrestricted prepaid or legacy available funds.
+        grantAvailableUsd:
+          type: string
+          description: Active available grants; model applicability is checked at task admission.
+        cashShortfallUsd:
+          type: string
+          description: External payment recovery shortfall that cannot be covered by grants or credit.
+        credit:
+          $ref: "#/components/schemas/CreditFacilityItem"
+        grants:
+          type: array
+          items:
+            $ref: "#/components/schemas/FundingGrantItem"
+        grantsHasMore:
+          type: boolean
+    EnvelopeBase:
+      type: object
+      required:
+        - code
+        - msg
+        - request_id
+      properties:
+        code:
+          type: integer
+        msg:
+          type: string
+        request_id:
+          type: string
+          description: Correlation identifier. Include it in support requests.
+    ErrorEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          properties:
+            code:
+              type: integer
+              enum:
+                - 400
+                - 40003
+                - 40004
+                - 401
+                - 40201
+                - 40202
+                - 403
+                - 40301
+                - 40302
+                - 40303
+                - 40310
+                - 404
+                - 409
+                - 40901
+                - 413
+                - 429
+                - 500
+                - 503
+                - 50301
+                - 50302
+              description: "Business code. `40003`: an uploaded file's actual size, media type or signature does not match its upload ticket (file commit). `40004`: the request is valid but no deployment can serve this exact parameter combination; change the named parameter and retry. `503`: a dependency is temporarily unavailable (for example a list or usage query timed out, or inline image storage failed); honour `Retry-After` when present. `50301`: the model has no usable deployment or effective price right now. `50302`: a synchronous generation (streaming) failed upstream and the charge was refunded. Retry with a **new** `Idempotency-Key` — the original key replays the same failure, so a transport-level retry that keeps the key can never succeed. `40301`: this key is not allowed to call this model — check the key's model restrictions in the Console. `40302`: the caller's address is not in this key's IP allow-list. `40303`: the request comes from a region this service is not offered in; the message deliberately does not state how that is determined, and neither does this description. `40310`: the account has not verified its email address yet, so it cannot run models. Open the verification link that was emailed at sign-up, or send a new one from the Console; the key starts working as soon as the address is verified, with no change on your side."
+            msg:
+              type: string
+              description: Human-readable explanation, English unless `Accept-Language` or the account's API error language selects another supported language. Never parse it; branch on `code`.
+            data:
+              type: object
+              description: "Present only when the failure carries a machine-readable reason; otherwise absent. `code`, the HTTP status and `msg` are the same with or without it. `asset_library_locked` (400): the asset library opens after the first top-up. `asset_library_full` (400): the allowance is full. `asset_file_too_large` (400): the file is above the plan's per-file limit. `asset_daily_limit` (429): the daily number of new assets is reached; honour `Retry-After`. `asset_storage_full` (503): storage is full across the platform. `asset_permission_denied` (403): the caller's team role does not allow this change. `asset_workspace_forbidden` (403): this key or workspace cannot reach that library. `adult_content`, `minor_safety` and `image_rejected` (400): the content safety gate declined the prompt or an input image before anything was charged. New values may be added; treat unknown values like an absent reason."
+              required:
+                - reason
+              properties:
+                reason:
+                  type: string
+                  enum:
+                    - asset_library_locked
+                    - asset_library_full
+                    - asset_file_too_large
+                    - asset_daily_limit
+                    - asset_storage_full
+                    - asset_permission_denied
+                    - asset_workspace_forbidden
+                    - asset_entity_name_taken
+                    - unknown_model
+                    - unknown_task
+                    - insufficient_credits
+                    - adult_content
+                    - minor_safety
+                    - image_rejected
+                    - signup_paused
+    CreateTaskRequest:
+      type: object
+      required:
+        - model
+        - input
+      additionalProperties: false
+      properties:
+        model:
+          type: string
+          minLength: 1
+          description: Model call name, `<publisher>/<model>/<task>` (for example `alibaba/wan-3.0/image-to-video`). The list below is the catalog at generation time; `GET /api/v1/models` is the live source.
+          enum:
+            - alibaba/happyhorse-1.1/image-to-video
+            - alibaba/happyhorse-1.1/reference-to-video
+            - alibaba/happyhorse-1.1/text-to-video
+            - alibaba/qwen-3-tts/text-to-speech
+            - alibaba/qwen-image-1.0-lora/edit
+            - alibaba/qwen-image-1.0-lora/text-to-image
+            - alibaba/qwen-image-2.1-lora/edit
+            - alibaba/qwen-image-2.1-lora/text-to-image
+            - alibaba/qwen-image-2.1-pro/edit
+            - alibaba/qwen-image-2.1-pro/text-to-image
+            - alibaba/qwen-image-2.1-turbo/edit
+            - alibaba/qwen-image-2.1-turbo/text-to-image
+            - alibaba/qwen-image-2.1/edit
+            - alibaba/qwen-image-2.1/text-to-image
+            - alibaba/qwen-image-2/edit
+            - alibaba/qwen-image-2/text-to-image
+            - alibaba/qwen-image-2512-lora/edit
+            - alibaba/qwen-image-2512-lora/text-to-image
+            - alibaba/qwen-image-3.0-pro/edit
+            - alibaba/qwen-image-3.0-pro/text-to-image
+            - alibaba/qwen-image-3.0/edit
+            - alibaba/qwen-image-3.0/text-to-image
+            - alibaba/qwen-image-edit-2509-lora/edit
+            - alibaba/wan-2.1-image-lora/edit
+            - alibaba/wan-2.1-image-lora/text-to-image
+            - alibaba/wan-2.1-lora/image-to-video
+            - alibaba/wan-2.1-lora/text-to-video
+            - alibaba/wan-2.1-lora/video-edit
+            - alibaba/wan-2.2-5b-lora/image-to-video
+            - alibaba/wan-2.2-5b-lora/text-to-video
+            - alibaba/wan-2.2-animate/character-animation
+            - alibaba/wan-2.2-image-lora/text-to-image
+            - alibaba/wan-2.2-lora/image-to-video
+            - alibaba/wan-2.2-lora/text-to-video
+            - alibaba/wan-2.2-lora/video-extend
+            - alibaba/wan-2.2/image-to-video
+            - alibaba/wan-2.2/text-to-video
+            - alibaba/wan-2.5/image-to-video
+            - alibaba/wan-2.5/text-to-video
+            - alibaba/wan-2.5/video-extend
+            - alibaba/wan-2.6-flash/image-to-video
+            - alibaba/wan-2.6-flash/reference-to-video
+            - alibaba/wan-2.6/image-to-video
+            - alibaba/wan-2.6/reference-to-video
+            - alibaba/wan-2.6/text-to-video
+            - alibaba/wan-2.7-pro/edit
+            - alibaba/wan-2.7-pro/text-to-image
+            - alibaba/wan-2.7/edit
+            - alibaba/wan-2.7/text-to-image
+            - alibaba/wan-3.0-prime/image-to-video
+            - alibaba/wan-3.0-prime/reference-to-video
+            - alibaba/wan-3.0-prime/text-to-video
+            - alibaba/wan-3.0-prime/video-extend
+            - alibaba/wan-3.0-pro-prime/image-to-video
+            - alibaba/wan-3.0-pro-prime/reference-to-video
+            - alibaba/wan-3.0-pro-prime/text-to-video
+            - alibaba/wan-3.0-pro-prime/video-extend
+            - alibaba/wan-3.0-pro/image-to-video
+            - alibaba/wan-3.0-pro/reference-to-video
+            - alibaba/wan-3.0-pro/text-to-video
+            - alibaba/wan-3.0-pro/video-extend
+            - alibaba/wan-3.0/image-to-video
+            - alibaba/wan-3.0/reference-to-video
+            - alibaba/wan-3.0/text-to-video
+            - alibaba/wan-3.0/video-extend
+            - alibaba/z-image-base-lora/edit
+            - alibaba/z-image-base-lora/text-to-image
+            - alibaba/z-image-turbo-lora/edit
+            - alibaba/z-image-turbo-lora/text-to-image
+            - alibaba/z-image-turbo/text-to-image
+            - black-forest-labs/flux-1-dev-controlnet-lora/text-to-image
+            - black-forest-labs/flux-1-dev-lora/edit
+            - black-forest-labs/flux-1-dev-lora/text-to-image
+            - black-forest-labs/flux-1-fill-dev-lora/edit
+            - black-forest-labs/flux-1-krea-dev-lora/edit
+            - black-forest-labs/flux-1-krea-dev-lora/text-to-image
+            - black-forest-labs/flux-1-schnell-lora/edit
+            - black-forest-labs/flux-1-schnell-lora/text-to-image
+            - black-forest-labs/flux-2-dev-lora/edit
+            - black-forest-labs/flux-2-dev-lora/text-to-image
+            - black-forest-labs/flux-2-dev/edit
+            - black-forest-labs/flux-2-dev/text-to-image
+            - black-forest-labs/flux-2-flex/edit
+            - black-forest-labs/flux-2-flex/text-to-image
+            - black-forest-labs/flux-2-klein-4b-lora/edit
+            - black-forest-labs/flux-2-klein-4b-lora/text-to-image
+            - black-forest-labs/flux-2-klein-4b/edit
+            - black-forest-labs/flux-2-klein-4b/text-to-image
+            - black-forest-labs/flux-2-klein-9b-lora/edit
+            - black-forest-labs/flux-2-klein-9b-lora/text-to-image
+            - black-forest-labs/flux-2-klein-9b/edit
+            - black-forest-labs/flux-2-klein-9b/text-to-image
+            - black-forest-labs/flux-2-klein-base-4b-lora/edit
+            - black-forest-labs/flux-2-klein-base-4b-lora/text-to-image
+            - black-forest-labs/flux-2-klein-base-9b-lora/edit
+            - black-forest-labs/flux-2-klein-base-9b-lora/text-to-image
+            - black-forest-labs/flux-2-max/edit
+            - black-forest-labs/flux-2-max/text-to-image
+            - black-forest-labs/flux-2-pro/edit
+            - black-forest-labs/flux-2-pro/text-to-image
+            - black-forest-labs/flux-3-klein-base-lora/edit
+            - black-forest-labs/flux-3-klein-base-lora/text-to-image
+            - black-forest-labs/flux-3-klein-base/edit
+            - black-forest-labs/flux-3-klein-base/text-to-image
+            - black-forest-labs/flux-3/image-to-video
+            - black-forest-labs/flux-3/text-to-video
+            - black-forest-labs/flux-3/upscale
+            - black-forest-labs/flux-3/video-extend
+            - bytedance/seed-audio-1.0/text-to-audio
+            - bytedance/seed-speech-2.0/text-to-speech
+            - bytedance/seedance-1.5-pro/image-to-video
+            - bytedance/seedance-1.5-pro/text-to-video
+            - bytedance/seedance-1.5-pro/video-extend
+            - bytedance/seedance-2.0-fast/image-to-video
+            - bytedance/seedance-2.0-fast/reference-to-video
+            - bytedance/seedance-2.0-fast/text-to-video
+            - bytedance/seedance-2.0-fast/video-extend
+            - bytedance/seedance-2.0-mini/image-to-video
+            - bytedance/seedance-2.0-mini/reference-to-video
+            - bytedance/seedance-2.0-mini/text-to-video
+            - bytedance/seedance-2.0-mini/video-extend
+            - bytedance/seedance-2.0/image-to-video
+            - bytedance/seedance-2.0/reference-to-video
+            - bytedance/seedance-2.0/text-to-video
+            - bytedance/seedance-2.0/video-extend
+            - bytedance/seedance-2.5/image-to-video
+            - bytedance/seedance-2.5/reference-to-video
+            - bytedance/seedance-2.5/text-to-video
+            - bytedance/seedance-2.5/video-extend
+            - bytedance/seedream-4.0/edit
+            - bytedance/seedream-4.0/text-to-image
+            - bytedance/seedream-5.0-flash/edit
+            - bytedance/seedream-5.0-flash/layer-decomposition
+            - bytedance/seedream-5.0-flash/text-to-image
+            - bytedance/seedream-5.0-lite/edit
+            - bytedance/seedream-5.0-lite/text-to-image
+            - bytedance/seedream-5.0-pro/edit
+            - bytedance/seedream-5.0-pro/layer-decomposition
+            - bytedance/seedream-5.0-pro/text-to-image
+            - circlestone-labs/anima-turbo-lora/edit
+            - circlestone-labs/anima-turbo-lora/text-to-image
+            - circlestone-labs/anima-turbo/edit
+            - circlestone-labs/anima-turbo/text-to-image
+            - google/gemini-2.5-pro-tts/text-to-speech
+            - google/gemini-3.8-flash-lite-tts/text-to-speech
+            - google/gemini-3.8-flash-tts/text-to-speech
+            - google/nano-banana-2.1/edit
+            - google/nano-banana-2.1/text-to-image
+            - google/nano-banana-2/edit
+            - google/nano-banana-2/text-to-image
+            - google/nano-banana-pro/edit
+            - google/nano-banana-pro/text-to-image
+            - heartmula/transcribe/speech-to-text
+            - j1b/jib-mix-qwen-image-lora/text-to-image
+            - j1b/jib-mix-qwen-image/text-to-image
+            - kling/2.1-master/image-to-video
+            - kling/2.1-master/text-to-video
+            - kling/2.1/image-to-video
+            - kling/2.5-turbo/image-to-video
+            - kling/2.5-turbo/text-to-video
+            - kling/2.6/character-animation
+            - kling/2.6/image-to-video
+            - kling/2.6/text-to-video
+            - kling/3.0-turbo/image-to-video
+            - kling/3.0-turbo/text-to-video
+            - kling/3.0/character-animation
+            - kling/3.0/image-to-video
+            - kling/3.0/text-to-video
+            - kling/4.0/image-to-video
+            - kling/4.0/reference-to-video
+            - kling/4.0/text-to-video
+            - kling/o3/image-to-video
+            - kling/o3/reference-to-video
+            - kling/o3/text-to-video
+            - kling/o3/video-edit
+            - krea/2-large/text-to-image
+            - krea/2-medium-turbo/text-to-image
+            - krea/2-medium/text-to-image
+            - krea/2-turbo-lora/edit
+            - krea/2-turbo-lora/text-to-image
+            - krea/3/edit
+            - krea/3/text-to-image
+            - lightricks/ltx-2-19b-lora/image-to-video
+            - lightricks/ltx-2-19b-lora/text-to-video
+            - lightricks/ltx-2-19b/image-to-video
+            - lightricks/ltx-2-19b/text-to-video
+            - lightricks/ltx-2-19b/video-extend
+            - lightricks/ltx-2.3-lora/image-to-video
+            - lightricks/ltx-2.3-lora/text-to-video
+            - lightricks/ltx-2.5/image-to-video
+            - lightricks/ltx-2.5/text-to-video
+            - minimax/h3-360-orbit/image-to-video
+            - minimax/h3-image-lora/edit
+            - minimax/h3-image-lora/text-to-image
+            - minimax/h3-lora/image-to-video
+            - minimax/h3-lora/reference-to-video
+            - minimax/h3-lora/text-to-video
+            - minimax/h3-lora/video-extend
+            - minimax/h3-max/image-to-video
+            - minimax/h3-max/text-to-video
+            - minimax/h3-max/video-extend
+            - minimax/h3-singularity-lora/image-to-video
+            - minimax/h3-singularity-lora/reference-to-video
+            - minimax/h3-singularity-lora/video-extend
+            - minimax/h3/image-to-video
+            - minimax/h3/reference-to-video
+            - minimax/h3/text-to-video
+            - minimax/h3/video-extend
+            - minimax/music-3.0/text-to-audio
+            - minimax/speech-2.8-hd/text-to-speech
+            - minimax/speech-2.8-turbo/text-to-speech
+            - neta-art/neta-lumina/text-to-image
+            - openai/gpt-image-2.5-flare/edit
+            - openai/gpt-image-2.5-flare/text-to-image
+            - openai/gpt-image-2.5-sunburst/edit
+            - openai/gpt-image-2.5-sunburst/text-to-image
+            - openai/gpt-image-2/edit
+            - openai/gpt-image-2/text-to-image
+            - popnow/anime-to-real-v1/edit
+            - popnow/background-remover-v1/edit
+            - popnow/camera-angle-changer-v1/edit
+            - popnow/foley-v1/video-to-audio
+            - popnow/image-expander-v1/edit
+            - popnow/image-upscaler-v1/upscale
+            - popnow/object-eraser-v1/edit
+            - popnow/pose-changer-v1/edit
+            - popnow/relight-v1/edit
+            - popnow/shadow-remover-v1/edit
+            - popnow/video-upscaler-v1/upscale
+            - prefect/pony-xl-lora/text-to-image
+            - prefect/pony-xl/text-to-image
+            - pruna-ai/p-image-lora/edit
+            - pruna-ai/p-image-lora/text-to-image
+            - resemble-ai/chatterbox-v1/text-to-speech
+            - suno/v6-mini/text-to-audio
+            - suno/v6-wild/text-to-audio
+            - suno/v6/text-to-audio
+            - tencent/hunyuan-video-1.5/image-to-video
+            - tencent/hunyuan-video-1.5/text-to-video
+            - vidu/q3-pro/image-to-video
+            - vidu/q3-turbo/image-to-video
+            - vidu/q3-turbo/video-extend
+            - vidu/q3/image-to-video
+            - vidu/q4-preview/image-to-video
+            - vidu/q4-preview/reference-to-video
+            - vidu/q4-preview/video-extend
+            - xai/grok-stt/speech-to-text
+            - xai/grok-tts/text-to-speech
+        input:
+          type: object
+          description: Validated against the selected model's inputSchema (`GET /api/v1/models/{model}`). Declared media fields accept public HTTPS URLs, committed popnow://f/<id> file URIs (common/upload-url, then the file commit endpoint), saved assets as popnow://a/<id> in the media field of the matching kind (the asset must be in the library of the key's workspace; any other asset gets the same rejection as an unknown id), or standard Base64 Data URIs (image/jpeg, image/png, image/webp, image/gif). Inline images are limited to 1048576 decoded bytes and 8388608 pixels each, 8192 pixels per side, and 16 images / 16777216 pixels in total. The complete JSON request must fit within 2097152 bytes. Model-specific limits still apply. Bare Base64, SVG and inline audio/video are not accepted; use HTTPS or file uploads instead. Inline images are stored as account-bound uploaded files; returned input contains file URIs, never the original Base64 bytes. Quote validation does not upload or reserve credits. If the model's inputSchema declares `seed` and you omit it, we pick a random seed for this task, so two identical requests do not come back with the same output. The chosen seed is returned in the task's `input`; pass it back to hold the draw steady (a fixed seed keeps runs comparable, it does not guarantee an identical result). A `seed` you send yourself is always used as given.
+          additionalProperties: true
+        callBackUrl:
+          type: string
+          format: uri
+          description: "Optional public HTTPS endpoint for terminal task delivery. `http://` URLs are rejected: the delivery carries the prompt and signed result links. Explicit ports other than 443 and 80 are rejected, and URL credentials are rejected. The hostname must resolve to public IP addresses and is checked again when connecting. Invalid values return HTTP 400 with code 400, msg \"Invalid callback URL\", and request_id."
+        quoteId:
+          type: string
+          maxLength: 4096
+          description: Signed quote returned by jobs/quote for this same account, API key and request. Does not replace Idempotency-Key.
+        expectedCost:
+          allOf:
+            - $ref: "#/components/schemas/USDString"
+          description: Confirmed amount to reserve, with up to nine decimal places. A changed price returns business code 40901 before reservation.
+        expectedCredits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Confirmed number of credits to reserve, as returned in `maxCredits` by jobs/quote. 1 credit = $0.01. Send this or `expectedCost` (the same amount in USD); when both are sent, `expectedCredits` wins. A changed price returns business code 40901 before anything is reserved.
+    TaskQuoteResponse:
+      type: object
+      required:
+        - quoteId
+        - model
+        - estimatedCost
+        - maxCharge
+        - currency
+        - quantity
+        - unit
+        - expiresAt
+        - maxCredits
+        - expectedCredits
+      additionalProperties: false
+      properties:
+        quoteId:
+          type: string
+        model:
+          type: string
+          description: Resolved endpoint model identifier.
+        estimatedCost:
+          $ref: "#/components/schemas/USDString"
+        maxCharge:
+          $ref: "#/components/schemas/USDString"
+        maxCredits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The most this request can cost, in credits (1 credit = $0.01). This amount is held when the task is accepted; it equals `maxCharge`.
+        expectedCredits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: What this request usually costs, in credits. Equal to `maxCredits` unless the final charge depends on the output (for example its real duration); you are never charged more than `maxCredits`.
+        currency:
+          type: string
+          const: USD
+        quantity:
+          type: string
+          description: Estimated billable quantity.
+        unit:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+    TaskQuoteEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: "#/components/schemas/TaskQuoteResponse"
+    CreateTaskResponse:
+      type: object
+      required:
+        - taskId
+        - state
+        - estimatedCost
+        - deadlineAt
+        - estimatedCredits
+      properties:
+        taskId:
+          type: string
+        deadlineAt:
+          type: string
+          format: date-time
+          description: Server execution deadline fixed at acceptance; not a local wait timeout or result URL expiry. Idempotent replays retain the original deadline.
+        state:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+            - expired
+          description: "`queued` for a new submission; an idempotent replay reports the original task's current state."
+        estimatedCost:
+          allOf:
+            - $ref: "#/components/schemas/USDString"
+          description: Funds held when the task is accepted and the maximum customer charge for that task. Unused funds are released and no later amount is collected above the hold.
+        estimatedCredits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Credits held when the task was accepted (the same amount as `estimatedCost`); the most this task can cost. Unused credits are released when it settles.
+    TaskActionRequest:
+      type: object
+      required:
+        - taskId
+      additionalProperties: false
+      properties:
+        taskId:
+          type: string
+          minLength: 1
+    RetryTaskResponse:
+      allOf:
+        - $ref: "#/components/schemas/CreateTaskResponse"
+        - type: object
+          required:
+            - sourceTaskId
+          properties:
+            sourceTaskId:
+              type: string
+    RetryTaskEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/RetryTaskResponse"
+    TaskPurgeResponse:
+      type: object
+      required:
+        - taskId
+        - contentState
+        - billingRetained
+        - mediaDeletionPending
+      properties:
+        taskId:
+          type: string
+        contentState:
+          type: string
+          enum:
+            - present
+            - expired
+            - purged
+          description: "`purged` after a successful destroy, and on any idempotent repeat. Still `present` means this call removed nothing and may be retried later; the reason is deliberately not disclosed."
+        purgedAt:
+          type: string
+          format: date-time
+          description: Time of the **first** destroy, not of this call.
+        contentRemovedBy:
+          type: string
+          enum:
+            - user
+            - system
+          description: Omitted while `contentState` is `present`.
+        billingRetained:
+          type: boolean
+          const: true
+          description: Always true. Destroying content never changes the ledger, the charged amount, or any other billing fact. It is stated explicitly because it is the one thing a caller is likely to get wrong about an endpoint named "purge".
+        mediaDeletionPending:
+          type: boolean
+          description: True while the background sweep has not finished removing the stored media objects.
+    TaskPurgeEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/TaskPurgeResponse"
+    CreateTaskEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/CreateTaskResponse"
+    TaskOutput:
+      type: object
+      additionalProperties: true
+      description: First-party result metadata. Ready assets include directly usable temporary URLs; no download-ticket request is needed. Poll again to refresh an expired URL. Temporary URLs are bearer access grants; never attach your API key when fetching them.
+      properties:
+        text:
+          type: string
+          description: Text result (transcription). For transcription with multichannel on, one line per channel in channel order.
+        transcript:
+          $ref: "#/components/schemas/TaskTranscript"
+        assets:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskOutputAsset"
+    TaskTranscript:
+      type: object
+      description: Structured transcription result, present only on speech-to-text endpoints that return it. `text` above stays the plain transcript; this object adds timing and language details. Erased together with the rest of the task output on the prompt-retention schedule.
+      properties:
+        text:
+          type: string
+          description: Full transcript.
+        language:
+          type: string
+          description: Detected language, as reported by the model (for example en).
+        languageCode:
+          type: string
+          description: Detected language code (ISO 639-3, for example eng) when available.
+        languageProbability:
+          type: number
+          description: Confidence of the detected language, 0 to 1, when available.
+        durationSeconds:
+          type: number
+          description: Length of the transcribed audio in seconds.
+        words:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskTranscriptWord"
+        channels:
+          type: array
+          description: Present when multichannel transcription was requested; one entry per audio channel.
+          items:
+            $ref: "#/components/schemas/TaskTranscriptChannel"
+    TaskTranscriptWord:
+      type: object
+      required:
+        - text
+        - start
+        - end
+      properties:
+        text:
+          type: string
+        start:
+          type: number
+          description: Start time in seconds from the beginning of the audio.
+        end:
+          type: number
+          description: End time in seconds.
+        type:
+          type: string
+          description: Segment type (for example word) when the model reports one.
+        speakerId:
+          type: string
+          description: Speaker label; only present when the model performs speaker separation.
+    TaskTranscriptChannel:
+      type: object
+      required:
+        - index
+      properties:
+        index:
+          type: integer
+          description: Zero-based channel index.
+        text:
+          type: string
+        language:
+          type: string
+        languageCode:
+          type: string
+        words:
+          type: array
+          items:
+            $ref: "#/components/schemas/TaskTranscriptWord"
+    TaskOutputAsset:
+      type: object
+      additionalProperties: true
+      properties:
+        key:
+          type: string
+          description: Compatibility identifier for optional download-url requests.
+        url:
+          type: string
+          format: uri
+          description: First-party signed GET URL on PopNow storage, normally valid for 20 minutes. Absent while pending or unavailable. Request a fresh one with recordInfo or common/download-url after it expires.
+        expiresAt:
+          type: string
+          format: date-time
+          description: Expiry of this URL, not the result retention deadline.
+        mime:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+        durationSeconds:
+          type: number
+        bytes:
+          type: integer
+          format: int64
+        role:
+          type: string
+          description: "What the asset is: `video`, `image`, `audio` or a model-specific role. Video extend endpoints that join the source clip to the new footage return two assets in a fixed order: the joined clip first (`video`), then the newly generated part on its own (`segment`). Endpoints that return only the new part have no `segment` asset."
+        pending:
+          type: boolean
+        unavailable:
+          type: boolean
+        deleted:
+          type: boolean
+          description: "PopNow only: the owner permanently deleted this output (one output of a multi-output task). Always comes with unavailable true and no key or url; the stored file is being deleted."
+        layer:
+          type: object
+          description: Present only on layer decomposition results. The first asset is the base image (the source with the separated elements removed, `zIndex` 0); every other asset is one transparent PNG layer. Stack them by ascending `zIndex` to rebuild the picture. `boundingBox` is `[x1, y1, x2, y2]` in base-image pixels and places the layer on the base (scale the layer to that box); it is absent on the base image and on models that do not report positions, in which case the layers can still be used as standalone cut-outs. `name` is the model's label for the layer when it gives one.
+          required:
+            - zIndex
+          properties:
+            zIndex:
+              type: integer
+              minimum: 0
+            name:
+              type: string
+            boundingBox:
+              type: array
+              minItems: 4
+              maxItems: 4
+              items:
+                type: integer
+                minimum: 0
+    TaskRecord:
+      type: object
+      required:
+        - taskId
+        - model
+        - state
+        - cost
+        - settled
+        - createdAt
+        - credits
+      properties:
+        taskId:
+          type: string
+        sourceTaskId:
+          type: string
+          description: Present when this task was created by explicit retry.
+        model:
+          type: string
+          description: Model call name, `<publisher>/<model>/<task>`.
+        state:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+            - expired
+        input:
+          description: Normalized model input; inline images become account-bound file URIs. Includes the random `seed` we picked when you omitted one (see CreateTaskRequest.input). Omitted after retention redaction.
+          type: object
+          additionalProperties: true
+        output:
+          $ref: "#/components/schemas/TaskOutput"
+        errorCode:
+          type: string
+          description: "Stable PopNow failure identifier from a closed set; never an internal diagnostic code. The set is closed: any other value a client sees should be handled as `upstream_failed`."
+          enum:
+            - invalid_request
+            - unsupported_combination
+            - content_rejected
+            - rate_limited
+            - upstream_unavailable
+            - generation_failed
+            - timeout
+            - invalid_asset
+            - upstream_failed
+        errorMessage:
+          type: string
+          description: Human-readable failure reason. When the model service reported a specific reason (for example a corrupted reference image or a copyright restriction on generated audio), that reason is returned in English with internal service names, hosts, URLs, request and task IDs, error-code suffixes and account or billing details removed; otherwise a normalized message that follows the same language selection as `msg`. `errorCode` never changes and remains the value to branch on.
+        cost:
+          $ref: "#/components/schemas/USDString"
+        credits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The same amount as `cost`, in credits (1 credit = $0.01). Before settlement it is the held amount; after settlement it is the final charge.
+        settled:
+          type: boolean
+          description: When false, `cost` is the held estimate. When true, `cost` is the final charge. On success the final charge is capped at that hold; unused funds are released. Failed or expired tasks normally release the hold in full; the one exception is a `content_rejected` task on a model whose page states that such refusals are billed, which is settled at the accepted estimate.
+        createdAt:
+          type: string
+          format: date-time
+        deadlineAt:
+          type: string
+          format: date-time
+          description: Server execution deadline. Present in current responses; historical stored webhook events may omit it. Not the result retention or URL expiry time.
+        completedAt:
+          type: string
+          format: date-time
+        contentState:
+          type: string
+          enum:
+            - present
+            - expired
+            - purged
+          description: "Whether the task content is still stored, and why it is not. `expired` means the retention policy removed it; `purged` means the account owner destroyed it with `purgeTask`. The two are deliberately distinct: telling a customer their own deletion was an expiry reads as the platform losing their data."
+        contentRemovedBy:
+          type: string
+          enum:
+            - user
+            - system
+          description: Present only once content has been removed. Omitted while `contentState` is `present`.
+        purgedAt:
+          type: string
+          format: date-time
+          description: Present only for a task destroyed with `purgeTask`. Expiry does not set it.
+        retention:
+          $ref: "#/components/schemas/TaskRetention"
+    TaskRetention:
+      type: object
+      description: When this task's content is scheduled to be removed, and which layer decided it. Omitted for tasks created before per-task retention existed; those follow the platform maximum.
+      required:
+        - outputsExpireAt
+        - promptsExpireAt
+        - source
+      properties:
+        outputsExpireAt:
+          type: string
+          format: date-time
+          description: When the generated media objects and the result payload are removed. Before the task finishes this is measured from acceptance; when the task reaches a terminal state it is re-based on the completion time using the same window, so it only ever moves later, never earlier.
+        promptsExpireAt:
+          type: string
+          format: date-time
+          description: When the stored request text is erased. The task row, its state, amounts and request_id remain.
+        source:
+          type: string
+          enum:
+            - header
+            - account
+            - platform
+          description: "Which layer actually constrained the value: the per-request `X-PopNow-Retention` header, the account setting, or the platform maximum. A request that sends the header and still sees `account` has an account setting that is already shorter than it asked for."
+    TaskRecordEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/TaskRecord"
+    APIKeyTaskItem:
+      type: object
+      additionalProperties: false
+      required:
+        - taskId
+        - model
+        - state
+        - cost
+        - settled
+        - createdAt
+        - deadlineAt
+        - credits
+      properties:
+        taskId:
+          type: string
+        requestId:
+          type: string
+          description: The `X-Request-Id` of the request that created this task. Omitted when no request id was recorded.
+        model:
+          type: string
+          description: Model call name, `<publisher>/<model>/<task>`.
+        state:
+          type: string
+          enum:
+            - queued
+            - running
+            - succeeded
+            - failed
+            - canceled
+            - expired
+        cost:
+          allOf:
+            - $ref: "#/components/schemas/USDString"
+          description: Final charged USD if settled; otherwise the current held estimate.
+        credits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: The same amount as `cost`, in credits.
+        settled:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        deadlineAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+    APIKeyTaskListResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - items
+        - hasMore
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIKeyTaskItem"
+        hasMore:
+          type: boolean
+        nextCursor:
+          type: string
+          description: Present only when hasMore is true.
+    APIKeyTaskListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/APIKeyTaskListResponse"
+    APIKeyUsageResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - from
+        - to
+        - currency
+        - totalCalls
+        - totalSpend
+        - days
+        - models
+        - totalCredits
+      properties:
+        from:
+          type: string
+          format: date
+        to:
+          type: string
+          format: date
+        currency:
+          type: string
+          const: USD
+        totalCalls:
+          type: integer
+          format: int64
+          minimum: 0
+        totalSpend:
+          $ref: "#/components/schemas/USDString"
+        totalCredits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Total settled spend in credits (the same amount as `totalSpend`).
+        days:
+          type: array
+          items:
+            $ref: "#/components/schemas/UsageDayItem"
+        models:
+          type: array
+          items:
+            $ref: "#/components/schemas/UsageModelItem"
+    UsageDayItem:
+      type: object
+      additionalProperties: false
+      required:
+        - day
+        - calls
+        - succeeded
+        - failed
+        - spend
+        - credits
+      properties:
+        day:
+          type: string
+          format: date
+        calls:
+          type: integer
+          format: int64
+          minimum: 0
+        succeeded:
+          type: integer
+          format: int64
+          minimum: 0
+        failed:
+          type: integer
+          format: int64
+          minimum: 0
+        spend:
+          $ref: "#/components/schemas/USDString"
+        credits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Settled spend in credits (the same amount as `spend`).
+    UsageModelItem:
+      type: object
+      additionalProperties: false
+      required:
+        - model
+        - calls
+        - succeeded
+        - failed
+        - spend
+        - credits
+      properties:
+        model:
+          type: string
+          description: Model call name, `<publisher>/<model>/<task>`.
+        calls:
+          type: integer
+          format: int64
+          minimum: 0
+        succeeded:
+          type: integer
+          format: int64
+          minimum: 0
+        failed:
+          type: integer
+          format: int64
+          minimum: 0
+        spend:
+          $ref: "#/components/schemas/USDString"
+        credits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Settled spend in credits (the same amount as `spend`).
+    APIKeyUsageEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              $ref: "#/components/schemas/APIKeyUsageResponse"
+    Balance:
+      type: object
+      required:
+        - available
+        - held
+        - total
+        - availableCredits
+        - heldCredits
+        - totalCredits
+      properties:
+        funding:
+          $ref: "#/components/schemas/FundingOverview"
+        available:
+          $ref: "#/components/schemas/USDString"
+        held:
+          $ref: "#/components/schemas/USDString"
+        total:
+          $ref: "#/components/schemas/USDString"
+        availableCredits:
+          type: integer
+          format: int64
+          description: Credits you can spend now (the same amount as `available`, rounded down to a whole credit).
+        heldCredits:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Credits held by accepted tasks that have not settled yet.
+        totalCredits:
+          type: integer
+          format: int64
+          description: "`availableCredits` + `heldCredits`."
+    BalanceEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/Balance"
+    APIModel:
+      type: object
+      required:
+        - model
+        - family
+        - displayName
+        - provider
+        - modality
+        - tasks
+        - async
+        - taskTimeoutSeconds
+        - enabled
+        - available
+        - quantityField
+        - version
+        - availability
+        - badges
+        - relatedModels
+        - updatedAt
+        - credits
+      properties:
+        model:
+          type: string
+          description: Model call name in `<publisher>/<model>/<task>` form; the value `createTask.model` takes. Image editing uses the `edit` suffix.
+          example: alibaba/wan-3.0/image-to-video
+        family:
+          type: string
+          description: Stable product-family identifier; endpoint variants are listed in `tasks` and expressed by `inputSchema`.
+        displayName:
+          type: string
+        provider:
+          type: string
+          description: Model creator/author identifier, such as the research lab that built the model.
+        modality:
+          type: string
+          enum:
+            - image
+            - video
+            - audio
+        tasks:
+          type: array
+          items:
+            type: string
+          description: "The internal task classification of this one endpoint. Always exactly one element, and it is not always the suffix of `model`: image editing endpoints are published as `.../edit` but classified as `image-to-image` (or `image-edit` for single-purpose tools). Use `model` to call, and `tasks[0]` only to group or filter. New values appear as models are added, so treat the set as open."
+        async:
+          type: boolean
+        toolkit:
+          type: string
+          enum:
+            - subject-swap
+            - studio-tools
+          description: Which toolkit family this model belongs to (subject-swap for identity swaps; studio-tools for single-purpose image and video tools such as background removal or upscaling). Informational classification for catalogue grouping only; it does not participate in routing, pricing or authorization. Absent when the model is not part of a toolkit.
+        taskTimeoutSeconds:
+          type: integer
+          minimum: 1
+          description: Absolute platform execution deadline before timeout/refund; not media output duration.
+        maxOutputDurationSeconds:
+          type: integer
+          minimum: 1
+          description: Maximum output duration the model schema allows, taken from the `maximum` of its `duration_seconds` property; omitted when that property is absent or has no declared maximum. Distinct from `taskTimeoutSeconds`, which is the platform execution deadline.
+        enabled:
+          type: boolean
+        available:
+          type: boolean
+          description: Whether the model can be called right now.
+        quantityField:
+          type: string
+        credits:
+          type: object
+          description: "Price in credits (1 credit = $0.01), the same price popnow.ai shows. `unit` is how the price scales (`per_image`, `per_second`, `per_request`…), `perUnit` is the starting price per unit, and `rules` lists the tiers: each rule applies when the request matches its `when` values (`*` matches the field that sets the tier). Use jobs/quote for the exact amount of one request."
+          required:
+            - unit
+            - perUnit
+          properties:
+            unit:
+              type: string
+            perUnit:
+              type: number
+              minimum: 0
+            rules:
+              type: array
+              items:
+                type: object
+                required:
+                  - when
+                  - perUnit
+                properties:
+                  when:
+                    type: object
+                    additionalProperties: true
+                  perUnit:
+                    type: number
+                    minimum: 0
+                  unit:
+                    type: string
+          additionalProperties: true
+        inputSchema:
+          type: object
+          description: "JSON Schema draft 2020-12 used by `createTask.input` validation and Playground rendering. Standard JSON Schema keywords validate. Presentation hints live only in a per-property `x-ui` object whose keys are snake_case and drawn from a closed set: `widget`, `order`, `label`, `placeholder`, `rows`, `step`, `unit`, `accept`, `max_size_mb`, `max_duration_seconds`, `max_total_duration_seconds`, `advanced`, `primary`, `affects_price`, `visible_when`, `enum_labels`, `reference_tokens`, `reference_sequence`, `reference_regions`, `mask`. `x-ui.order` is the only source of field order (descending first). `x-ui.widget` is one of `textarea`, `text`, `upload`, `multi-upload`, `select`, `radio`, `slider`, `number`, `switch`, `json`, `object-list`, `chat-messages`, `hidden`. Root-level composition is limited to `anyOf`, where every branch contains only `required`, and `allOf`, where each branch is `if` (`required` or `properties.*.const`) plus `then` (`required`); `oneOf`, `not` and `dependentSchemas` never appear. Unknown hints must be ignored."
+          additionalProperties: true
+        version:
+          type: string
+          description: Public model-catalog version label used to detect schema or metadata changes.
+        availability:
+          type: string
+          enum:
+            - planned
+            - available
+            - preview
+            - maintenance
+        badges:
+          type: array
+          description: Closed capability and licensing vocabulary; clients should ignore unknown future IDs.
+          items:
+            type: string
+            enum:
+              - commercial_use
+              - no_watermark
+              - commercial_restricted
+              - reference_input
+              - audio_output
+              - fast_tier
+              - high_resolution
+        relatedModels:
+          type: array
+          description: Curated model identifiers suitable for alternatives or workflow steps.
+          items:
+            type: string
+        examples:
+          type: array
+          description: A ready-to-run example input, the same one the API reference shows. Validated against this model's current input schema.
+          items:
+            $ref: "#/components/schemas/APIModelExample"
+        updatedAt:
+          type: string
+          format: date-time
+    APIModelExample:
+      type: object
+      required:
+        - id
+        - input
+        - sortWeight
+      properties:
+        id:
+          type: string
+        input:
+          type: object
+          additionalProperties: true
+        sortWeight:
+          type: integer
+    APIModelList:
+      type: object
+      required:
+        - total
+        - items
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIModel"
+    ModelEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/APIModel"
+    ModelListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/APIModelList"
+    UploadURLRequest:
+      type: object
+      required:
+        - contentType
+        - bytes
+      additionalProperties: false
+      properties:
+        contentType:
+          type: string
+          enum:
+            - image/jpeg
+            - image/png
+            - image/webp
+            - image/gif
+            - video/mp4
+            - video/webm
+            - audio/mpeg
+            - audio/wav
+            - application/pdf
+            - application/msword
+            - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+            - application/vnd.ms-excel
+            - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+            - application/vnd.ms-powerpoint
+            - application/vnd.openxmlformats-officedocument.presentationml.presentation
+            - application/vnd.apple.keynote
+            - application/vnd.apple.pages
+            - application/vnd.apple.numbers
+            - text/plain
+            - text/markdown
+            - application/octet-stream
+        bytes:
+          type: integer
+          minimum: 1
+          maximum: 2147483648
+          description: Images are limited to 10 MiB; supported audio/video and documents to 90 MiB; LoRA weights (application/octet-stream, a .safetensors file) to 2 GiB.
+    UploadURLResponse:
+      type: object
+      required:
+        - fileId
+        - key
+        - uploadUrl
+        - method
+        - headers
+        - expiresAt
+        - maxBytes
+      properties:
+        fileId:
+          type: string
+          pattern: ^fil_
+        key:
+          type: string
+          pattern: ^popnow://f/fil_
+          description: Compatibility alias for the final URI; unusable until commit succeeds.
+        uploadUrl:
+          type: string
+          format: uri
+        method:
+          type: string
+          const: PUT
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        expiresAt:
+          type: string
+          format: date-time
+        maxBytes:
+          type: integer
+          minimum: 1
+    UploadURLEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/UploadURLResponse"
+    FileCommitResponse:
+      type: object
+      required:
+        - fileId
+        - status
+        - bytes
+        - contentType
+        - sha256
+        - uri
+        - expiresAt
+      properties:
+        fileId:
+          type: string
+          pattern: ^fil_
+        status:
+          type: string
+          const: ready
+        bytes:
+          type: integer
+          minimum: 1
+        contentType:
+          type: string
+          enum:
+            - image/jpeg
+            - image/png
+            - image/webp
+            - image/gif
+            - video/mp4
+            - video/webm
+            - audio/mpeg
+            - audio/wav
+            - application/pdf
+            - application/msword
+            - application/vnd.openxmlformats-officedocument.wordprocessingml.document
+            - application/vnd.ms-excel
+            - application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+            - application/vnd.ms-powerpoint
+            - application/vnd.openxmlformats-officedocument.presentationml.presentation
+            - application/vnd.apple.keynote
+            - application/vnd.apple.pages
+            - application/vnd.apple.numbers
+            - text/plain
+            - text/markdown
+        sha256:
+          type: string
+          pattern: ^[a-f0-9]{64}$
+        uri:
+          type: string
+          pattern: ^popnow://f/fil_
+        expiresAt:
+          type: string
+          format: date-time
+        durationSeconds:
+          type: string
+          description: Measured audio/video duration in seconds.
+        width:
+          type: integer
+          minimum: 0
+        height:
+          type: integer
+          minimum: 0
+    FileCommitEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/FileCommitResponse"
+    LoraImportRequest:
+      type: object
+      required:
+        - url
+      additionalProperties: false
+      properties:
+        url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: Hugging Face repo id (owner/repo), a Hugging Face repo or file page, or a direct https link to a .safetensors file.
+        token:
+          type: string
+          maxLength: 512
+          description: Optional Hugging Face access token or Civitai API key, used only for this download and never stored.
+    DownloadURLRequest:
+      type: object
+      required:
+        - taskId
+      additionalProperties: false
+      properties:
+        taskId:
+          type: string
+          minLength: 1
+        key:
+          type: string
+          description: Optional output key; empty selects the first output.
+    DownloadURLResponse:
+      type: object
+      required:
+        - key
+        - url
+        - expiresAt
+      properties:
+        key:
+          type: string
+        url:
+          type: string
+          format: uri
+        expiresAt:
+          type: string
+          format: date-time
+    DownloadURLEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/DownloadURLResponse"
+    AssetCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - source
+      properties:
+        source:
+          type: string
+          enum:
+            - task_output
+            - upload
+            - url
+        taskId:
+          type: string
+          description: "source=task_output: one of your own successful tasks."
+        key:
+          type: string
+          description: "source=task_output: the output key. Send key or index."
+        index:
+          type: integer
+          minimum: 0
+          description: "source=task_output: zero-based position in output.assets. Send key or index."
+        fileId:
+          type: string
+          description: "source=upload: a committed upload (fil_… or popnow://f/fil_…)."
+        url:
+          type: string
+          maxLength: 2048
+          description: "source=url: a public http or https address on port 80 or 443, without credentials."
+        name:
+          type: string
+          maxLength: 80
+          description: Defaults to "Saved asset".
+    Asset:
+      type: object
+      required:
+        - id
+        - uri
+        - name
+        - kind
+        - contentType
+        - bytes
+        - source
+        - sourceId
+        - createdAt
+        - updatedAt
+        - previewUrl
+        - favorite
+        - model
+        - modelName
+      properties:
+        id:
+          type: string
+          pattern: ^ast_
+        uri:
+          type: string
+          pattern: ^popnow://a/ast_
+          description: Stable reference. Works only in generation requests made with keys of the same workspace; it is never a downloadable link.
+        name:
+          type: string
+          maxLength: 80
+        kind:
+          type: string
+          enum:
+            - image
+            - video
+            - audio
+        contentType:
+          type: string
+        bytes:
+          type: integer
+          minimum: 1
+        width:
+          type: integer
+          minimum: 1
+        height:
+          type: integer
+          minimum: 1
+        durationSeconds:
+          type: number
+          exclusiveMinimum: 0
+        source:
+          type: string
+          enum:
+            - task_output
+            - upload
+            - url
+        sourceId:
+          type: string
+          description: Your task or upload id; for url, an opaque digest of the address (the address itself is not stored).
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        previewUrl:
+          type: string
+          description: Private preview signed for you for at most 20 minutes; empty when signing fails. Do not store or share it — persist uri instead.
+        previewUrlExpiresAt:
+          type: string
+          format: date-time
+        favorite:
+          type: boolean
+          description: Favorite mark of the library (shared by everyone in a team).
+        model:
+          type: string
+          description: Public name of the model that generated the asset, for example bytedance/seedream-5.0-pro/text-to-image; empty for uploads and links.
+        modelName:
+          type: string
+          description: Display name of that model; empty when the asset was not generated or the name is unknown.
+    AssetEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/Asset"
+    AssetEntity:
+      type: object
+      required:
+        - id
+        - kind
+        - name
+        - note
+        - coverAssetId
+        - cover
+        - assets
+        - count
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum:
+            - character
+        name:
+          type: string
+          minLength: 1
+          maxLength: 40
+          description: Unique within the library and kind (case-insensitive).
+        note:
+          type: string
+          maxLength: 280
+        coverAssetId:
+          type: string
+          description: Empty while the character has no images.
+        cover:
+          oneOf:
+            - $ref: "#/components/schemas/Asset"
+            - type: "null"
+        assets:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/Asset"
+          description: The character's images in order.
+        count:
+          type: integer
+          minimum: 0
+          maximum: 100
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    AssetEntityEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/AssetEntity"
+    AssetEntityListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              type: object
+              required:
+                - items
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: "#/components/schemas/AssetEntity"
+                nextCursor:
+                  type: string
+                  description: Absent on the last page.
+    AssetList:
+      type: object
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Asset"
+        nextCursor:
+          type: string
+          description: Absent on the last page.
+    AssetListEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/AssetList"
+    AssetPlan:
+      type: object
+      required:
+        - id
+        - name
+        - minTopupUsd
+        - maxBytes
+        - maxCount
+        - maxFileBytes
+      properties:
+        id:
+          type: string
+          description: Lowercase plan key, for example free, plus, pro, studio, max.
+        name:
+          type: string
+          description: Plan name, for example Free, Plus, Pro, Studio or Max.
+        minTopupUsd:
+          type: string
+          description: Lifetime top-ups in USD that unlock this plan.
+        maxBytes:
+          type: integer
+          minimum: 0
+          description: Total storage in bytes (binary units). 0 means saving is closed on this plan.
+        maxCount:
+          type: integer
+          minimum: 0
+        maxFileBytes:
+          type: integer
+          minimum: 0
+    AssetScope:
+      type: object
+      required:
+        - workspaceId
+        - personal
+        - role
+        - canWrite
+        - canTopUp
+      properties:
+        workspaceId:
+          type: string
+          description: "The workspace whose library this is: your personal workspace, or the team. Empty for an account that has no personal workspace yet."
+        personal:
+          type: boolean
+        role:
+          type: string
+          enum:
+            - owner
+            - admin
+            - developer
+            - billing
+            - readonly
+          description: Always owner for a personal library. For a team key, the current role of the member who created it.
+        canWrite:
+          type: boolean
+          description: Whether new assets can be saved here (owner, admin and developer).
+        canTopUp:
+          type: boolean
+          description: "Whether the caller can see and raise the owner's allowance: only the owner (personal library, or a team key the owner created). Billing members cannot top up for the owner."
+    AssetQuota:
+      type: object
+      required:
+        - tier
+        - usage
+        - limits
+        - full
+        - nextTier
+        - tiers
+        - dailyCreateLimit
+        - createdToday
+        - scope
+      properties:
+        tier:
+          $ref: "#/components/schemas/AssetPlan"
+        usage:
+          type: object
+          required:
+            - count
+            - bytes
+          properties:
+            count:
+              type: integer
+              minimum: 0
+            bytes:
+              type: integer
+              minimum: 0
+        limits:
+          type: object
+          required:
+            - tier
+            - maxCount
+            - maxBytes
+            - maxFileBytes
+            - globalMaxBytes
+            - nameMaxChars
+          properties:
+            tier:
+              type: string
+            maxCount:
+              type: integer
+              minimum: 0
+            maxBytes:
+              type: integer
+              minimum: 0
+            maxFileBytes:
+              type: integer
+              minimum: 0
+            globalMaxBytes:
+              type: integer
+              minimum: 0
+              description: Platform-wide ceiling; 0 disables it.
+            nameMaxChars:
+              type: integer
+              const: 80
+        full:
+          type: boolean
+          description: True when no new asset fits (including plans where saving is closed).
+        nextTier:
+          oneOf:
+            - $ref: "#/components/schemas/AssetPlan"
+            - type: "null"
+          description: The next plan with more storage or items; null on the highest plan.
+        topupToNextTierUsd:
+          type: string
+          description: How much more to top up, in USD, to reach nextTier. Omitted when scope.canTopUp is false.
+        lifetimeTopupUsd:
+          type: string
+          description: The owner's lifetime top-ups in USD as a decimal string, for example "25" or "12.50". Omitted when scope.canTopUp is false.
+        tiers:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssetPlan"
+        dailyCreateLimit:
+          type: integer
+          minimum: 1
+          description: New assets allowed per owner allowance per UTC day.
+        createdToday:
+          type: integer
+          minimum: 0
+        scope:
+          $ref: "#/components/schemas/AssetScope"
+    AssetQuotaEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              $ref: "#/components/schemas/AssetQuota"
+    AssetDeletedEnvelope:
+      allOf:
+        - $ref: "#/components/schemas/EnvelopeBase"
+        - type: object
+          required:
+            - data
+          properties:
+            code:
+              type: integer
+              const: 200
+            msg:
+              type: string
+              const: success
+            data:
+              type: object
+              required:
+                - id
+                - deleted
+              properties:
+                id:
+                  type: string
+                deleted:
+                  type: boolean
+                  const: true
+    USDString:
+      type: string
+      pattern: "^-?[0-9]+(?:\\.[0-9]+)?$"
+      description: Decimal USD amount encoded as a string to avoid binary floating-point loss.
+    OpenAIErrorBody:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - message
+            - type
+            - code
+          properties:
+            message:
+              type: string
+            type:
+              type: string
+              enum:
+                - invalid_request_error
+                - authentication_error
+                - permission_error
+                - insufficient_quota
+                - rate_limit_error
+                - server_error
+            param:
+              type:
+                - string
+                - "null"
+              description: The request field the error is about, as a dot path (for example `seconds`, `input_reference`). `null` when the error is not about a single field.
+            code:
+              type: string
+              description: Stable machine-readable reason, for example `invalid_request`, `unsupported_parameter` (the model does not accept this field or value), `content_rejected` (the model's content policy refused the request; HTTP 400, and retrying the same input will be refused again), `model_not_found`, `invalid_api_key`, `insufficient_balance`, `model_not_allowed`, `model_unavailable`, `rate_limit_exceeded`, `upstream_failed`.
+    OpenAIModelList:
+      type: object
+      required:
+        - object
+        - data
+      properties:
+        object:
+          type: string
+          const: list
+        data:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - object
+              - created
+              - owned_by
+            properties:
+              id:
+                type: string
+                description: Model call name; may contain slashes.
+              object:
+                type: string
+                const: model
+              created:
+                type: integer
+                description: Unix seconds of the last catalog update.
+              owned_by:
+                type: string
+                description: Model publisher.
+              modality:
+                type: string
+                enum:
+                  - image
+                  - video
+                  - audio
+                description: PopNow extension. Output modality.
+              task:
+                type: string
+                description: PopNow extension. The task this call name runs, for example `text-to-video`.
+    VideoCreateRequest:
+      type: object
+      required:
+        - model
+        - prompt
+      additionalProperties: false
+      properties:
+        model:
+          type: string
+          description: Video endpoint identifier from `/v1/models`.
+        prompt:
+          type: string
+        input_reference:
+          type: string
+          description: Reference image URL; mapped to the model's `image_url` / `image_urls`.
+        seconds:
+          oneOf:
+            - type: string
+            - type: integer
+          description: Clip length in seconds; mapped to `duration_seconds`.
+        size:
+          type: string
+          pattern: ^[0-9]+x[0-9]+$
+          description: WIDTHxHEIGHT, mapped to `resolution` / `aspect_ratio` (or `width` / `height`).
+    Video:
+      type: object
+      required:
+        - id
+        - object
+        - model
+        - status
+        - progress
+        - created_at
+      properties:
+        id:
+          type: string
+          description: Task identifier; also accepted by `/api/v1/jobs/recordInfo`.
+        object:
+          type: string
+          const: video
+        model:
+          type: string
+        status:
+          type: string
+          enum:
+            - queued
+            - in_progress
+            - completed
+            - failed
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: 100 when completed, otherwise 0; no fabricated intermediate values.
+        created_at:
+          type: integer
+        completed_at:
+          type: integer
+        seconds:
+          type: string
+        size:
+          type: string
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+            message:
+              type: string

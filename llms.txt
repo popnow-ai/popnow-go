@@ -1,0 +1,31 @@
+# popnow-go
+
+> Go SDK (module `github.com/popnow-ai/popnow-go`, package `popnow`, Go 1.23+, standard library only) for the PopNow API, which generates AI videos, images, music and speech with models such as Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux and Suno. Same credits and prices as popnow.ai (1 credit = $0.01).
+
+Install: `go get github.com/popnow-ai/popnow-go`. Auth: `popnow.New(popnow.Options{APIKey: ...})` or the `POPNOW_API_KEY` environment variable (`sk-popnow-...`, created at https://popnow.ai/api/console/keys). Base URL `https://api.popnow.ai/api/v1`. Every JSON response is `{code, msg, data, request_id}`; `code` 200 is success. Requests carry `User-Agent: popnow-go/<version>`.
+
+## Core usage
+
+- `client.CreateTask(ctx, popnow.CreateTaskInput{Model: "alibaba/z-image-turbo/text-to-image", Input: map[string]any{"prompt": "..."}}, idempotencyKey, popnow.CreateTaskOptions{})` -> POST /jobs/createTask (Idempotency-Key required by this client; `WaitSeconds` holds the request up to 60 s; `RetentionSeconds` sends X-PopNow-Retention).
+- `client.WaitForTerminal(ctx, taskID, popnow.WaitOptions{})` polls GET /jobs/recordInfo with back-off; `task.ReadyAssets()[0].URL` is a signed link valid ~20 minutes. `*popnow.WaitTimeoutError` is a local timeout, not a failure.
+- `client.Quote(ctx, input)` -> POST /jobs/quote; pass `QuoteID` and `ExpectedCredits: &quote.MaxCredits` to CreateTask (40901 if the price moved).
+- `client.GetTask`, `RetryTask`, `PurgeTask`, `ListTasks`, `EachTask`, `Tasks` (range-over-func iterator) for GET /jobs.
+- `client.ListModels`, `GetModel` (credit price in `Model.Credits`, JSON Schema in `InputSchema`).
+- Files: `client.UploadFile(ctx, path, "")` -> `popnow://f/fil_...` (three steps: /common/upload-url, PUT, /files/{id}/commit); `UploadReader` streams; `.safetensors` uploads as application/octet-stream; `ImportLoRA` -> POST /files/import; `CreateDownloadURL`.
+- Asset library: `CreateAsset` (Idempotency-Key required, source task_output/upload/url) -> `popnow://a/ast_...`; `ListAssets`, `EachAsset`, `Assets`, `GetAsset`, `UpdateAsset`, `DeleteAsset`, `GetAssetUsage`, `ListCharacters`, `GetCharacter`.
+- Account: `GetBalance` (GET /chat/credit, `AvailableCredits`), `GetUsage` (GET /usage).
+- Webhooks: `popnow.VerifyWebhook(secret, r.Header, rawBody, 0)` for callBackUrl deliveries (base64 HMAC-SHA256 over `taskId.timestamp.sha256hex(body)`); `popnow.VerifyEndpointWebhook` for Standard Webhooks account endpoints (`whsec_` secret).
+
+## Errors
+
+`*popnow.APIError{Status, Code, Message, Reason, RequestID, RetryAfter}`. Branch on `Code`: 400, 40003, 40004, 401, 40201 (insufficient credits), 40202, 403, 40301, 40302, 40303, 40310, 404, 409, 40901, 413, 429, 500, 503, 50301 (retried automatically: 429/500/503/50301), 50302 (refunded; resend with a new idempotency key). Failed generations are tasks with `State == "failed"` and an `ErrorCode`.
+
+## Links
+
+- Website: https://popnow.ai
+- Docs: https://popnow.ai/docs
+- OpenAPI: https://popnow.ai/docs/openapi.yaml
+- Pricing: https://popnow.ai/pricing
+- MCP server: https://popnow.ai/mcp (remote endpoint https://api.popnow.ai/mcp)
+- Site llms.txt: https://popnow.ai/llms.txt
+- Source: https://github.com/popnow-ai/popnow-go

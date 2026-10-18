@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: API documentation
+    url: https://popnow.ai/docs
+    about: Endpoints, models, errors and limits.
+  - name: Account, billing or task questions
+    url: https://popnow.ai/contact
+    about: Questions about your account, credits or a specific task go to PopNow support.
