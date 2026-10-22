@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// ModelCredits is a model's price in credits (1 credit = $0.01), the same
+// ModelCredits is a model's price in credits (1 credit = $0.001), the same
 // price popnow.ai shows. Use Quote for the exact amount of one request.
 type ModelCredits struct {
 	// Unit is how the price scales: per_image, per_second, per_request, ...

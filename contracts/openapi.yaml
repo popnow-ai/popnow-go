@@ -10,7 +10,7 @@ info:
     Every JSON response uses the `{code,msg,data,request_id}` envelope. A successful HTTP response has
     `code: 200`; asynchronous task success or failure is expressed by `data.state`, not by the envelope code.
     
-    Billing: 1 credit = $0.01. API calls and generations on the website use the same wallet and the same price.
+    Billing: 1 credit = $0.001. API calls and generations on the website use the same wallet and the same price.
     Amounts are returned both as integer credits (`maxCredits`, `estimatedCredits`, `credits`…) and as the
     equivalent USD decimal string (`maxCharge`, `estimatedCost`, `cost`…).
     
@@ -2045,7 +2045,7 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Confirmed number of credits to reserve, as returned in `maxCredits` by jobs/quote. 1 credit = $0.01. Send this or `expectedCost` (the same amount in USD); when both are sent, `expectedCredits` wins. A changed price returns business code 40901 before anything is reserved.
+          description: Confirmed number of credits to reserve, as returned in `maxCredits` by jobs/quote. 1 credit = $0.001. Send this or `expectedCost` (the same amount in USD); when both are sent, `expectedCredits` wins. A changed price returns business code 40901 before anything is reserved.
     TaskQuoteResponse:
       type: object
       required:
@@ -2074,7 +2074,7 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: The most this request can cost, in credits (1 credit = $0.01). This amount is held when the task is accepted; it equals `maxCharge`.
+          description: The most this request can cost, in credits (1 credit = $0.001). This amount is held when the task is accepted; it equals `maxCharge`.
         expectedCredits:
           type: integer
           format: int64
@@ -2422,7 +2422,7 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: The same amount as `cost`, in credits (1 credit = $0.01). Before settlement it is the held amount; after settlement it is the final charge.
+          description: The same amount as `cost`, in credits (1 credit = $0.001), rounded up to a whole credit. Before settlement it is the held amount; after settlement it is the final charge.
         settled:
           type: boolean
           description: When false, `cost` is the held estimate. When true, `cost` is the final charge. On success the final charge is capped at that hold; unused funds are released. Failed or expired tasks normally release the hold in full; the one exception is a `content_rejected` task on a model whose page states that such refusals are billed, which is settled at the accepted estimate.
@@ -2531,7 +2531,7 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: The same amount as `cost`, in credits.
+          description: The same amount as `cost`, in credits, rounded up to a whole credit.
         settled:
           type: boolean
         createdAt:
@@ -2805,7 +2805,7 @@ components:
           type: string
         credits:
           type: object
-          description: "Price in credits (1 credit = $0.01), the same price popnow.ai shows. `unit` is how the price scales (`per_image`, `per_second`, `per_request`…), `perUnit` is the starting price per unit, and `rules` lists the tiers: each rule applies when the request matches its `when` values (`*` matches the field that sets the tier). Use jobs/quote for the exact amount of one request."
+          description: "Price in credits (1 credit = $0.001), the same price popnow.ai shows. `unit` is how the price scales (`per_image`, `per_second`, `per_request`…), `perUnit` is the starting price per unit, and `rules` lists the tiers: each rule applies when the request matches its `when` values (`*` matches the field that sets the tier). Use jobs/quote for the exact amount of one request."
           required:
             - unit
             - perUnit

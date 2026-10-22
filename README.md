@@ -156,7 +156,7 @@ if err != nil {
 log.Println("accepted", task.TaskID, "holding", task.EstimatedCredits, "credits")
 ```
 
-1 credit = $0.01. The hold is the ceiling: unused credits are released when the task settles, and failed or expired tasks release the hold in full.
+1 credit = $0.001. The hold is the ceiling: unused credits are released when the task settles, and failed or expired tasks release the hold in full.
 
 ## Skip the first poll
 
@@ -361,7 +361,7 @@ Upload the image with `client.UploadFile` (or use a public HTTPS URL), then call
 
 ### How much does a PopNow API call cost?
 
-Each model has a credit price (1 credit = $0.01), shown by `ListModels` in `Model.Credits` and on [popnow.ai/pricing](https://popnow.ai/pricing). `client.Quote` returns the exact `MaxCredits` for one request without spending anything. API calls and the website share one wallet and one price list. Failed tasks are refunded.
+Each model has a credit price (1 credit = $0.001), shown by `ListModels` in `Model.Credits` and on [popnow.ai/pricing](https://popnow.ai/pricing). `client.Quote` returns the exact `MaxCredits` for one request without spending anything. API calls and the website share one wallet and one price list. Failed tasks are refunded.
 
 ### Which AI models can I call from Go?
 

@@ -493,7 +493,7 @@ func businessFailureAPI(t *testing.T, code int, msg string) *Client {
 func TestGetBalance(t *testing.T) {
 	api := newRecordingAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{
 		"available":"12.3456","held":"0.5000","total":"12.8456",
-		"availableCredits":1234,"heldCredits":50,"totalCredits":1284,
+		"availableCredits":12345,"heldCredits":500,"totalCredits":12845,
 		"funding":{"balanceUsd":"10.0000","heldUsd":"0.5000",
 			"prepaidAvailableUsd":"10.0000","grantAvailableUsd":"2.3456",
 			"cashShortfallUsd":"0","grantsHasMore":false,
@@ -515,7 +515,7 @@ func TestGetBalance(t *testing.T) {
 	if balance.Available != "12.3456" || balance.Held != "0.5000" || balance.Total != "12.8456" {
 		t.Errorf("balance = %+v", balance)
 	}
-	if balance.AvailableCredits != 1234 || balance.HeldCredits != 50 || balance.TotalCredits != 1284 {
+	if balance.AvailableCredits != 12345 || balance.HeldCredits != 500 || balance.TotalCredits != 12845 {
 		t.Errorf("balance credits = %+v", balance)
 	}
 	if balance.Funding == nil {
@@ -562,10 +562,10 @@ func TestGetBalanceDoesNotTreatABusinessFailureAsSuccess(t *testing.T) {
 func TestGetUsage(t *testing.T) {
 	api := newRecordingAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{
 		"from":"2026-09-01","to":"2026-09-08","currency":"USD",
-		"totalCalls":42,"totalSpend":"3.1400","totalCredits":314,
-		"days":[{"day":"2026-09-01","calls":2,"succeeded":1,"failed":1,"spend":"0.2000","credits":20}],
+		"totalCalls":42,"totalSpend":"3.1400","totalCredits":3140,
+		"days":[{"day":"2026-09-01","calls":2,"succeeded":1,"failed":1,"spend":"0.2000","credits":200}],
 		"models":[{"model":"bytedance/seedance-2.5/text-to-video",
-			"calls":40,"succeeded":40,"failed":0,"spend":"2.9400","credits":294}]}}`)
+			"calls":40,"succeeded":40,"failed":0,"spend":"2.9400","credits":2940}]}}`)
 
 	usage, err := api.client(t).GetUsage(context.Background(), UsageOptions{
 		From: "2026-09-01", To: "2026-09-08",
@@ -577,7 +577,7 @@ func TestGetUsage(t *testing.T) {
 	if got := api.seen(); len(got) != 1 || got[0] != "GET /usage?from=2026-09-01&to=2026-09-08" {
 		t.Errorf("requests = %v", got)
 	}
-	if usage.TotalCalls != 42 || usage.TotalSpend != "3.1400" || usage.TotalCredits != 314 || usage.Currency != "USD" {
+	if usage.TotalCalls != 42 || usage.TotalSpend != "3.1400" || usage.TotalCredits != 3140 || usage.Currency != "USD" {
 		t.Errorf("usage = %+v", usage)
 	}
 	// The window the server chose must be readable: with From and To unset it picks its own, and
@@ -588,7 +588,7 @@ func TestGetUsage(t *testing.T) {
 	if len(usage.Days) != 1 || usage.Days[0].Failed != 1 {
 		t.Errorf("days = %+v", usage.Days)
 	}
-	if len(usage.Models) != 1 || usage.Models[0].Spend != "2.9400" || usage.Models[0].Credits != 294 {
+	if len(usage.Models) != 1 || usage.Models[0].Spend != "2.9400" || usage.Models[0].Credits != 2940 {
 		t.Errorf("models = %+v", usage.Models)
 	}
 }
@@ -620,7 +620,7 @@ func TestGetUsageDoesNotTreatABusinessFailureAsSuccess(t *testing.T) {
 
 func TestListTasks(t *testing.T) {
 	api := newRecordingAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{
-		"items":[{"taskId":"task_1","model":"m","state":"succeeded","cost":"0.1200","credits":12,
+		"items":[{"taskId":"task_1","model":"m","state":"succeeded","cost":"0.1200","credits":120,
 			"settled":true,"createdAt":"2026-09-20T10:00:00Z",
 			"deadlineAt":"2026-09-20T10:30:00Z","completedAt":"2026-09-20T10:02:00Z"},
 			{"taskId":"task_2","model":"m","state":"running","cost":"0.1200",
@@ -645,7 +645,7 @@ func TestListTasks(t *testing.T) {
 	if !list.HasMore || list.NextCursor != "cur_page2" {
 		t.Errorf("hasMore = %v, nextCursor = %q", list.HasMore, list.NextCursor)
 	}
-	if !list.Items[0].Settled || list.Items[0].CompletedAt == nil || list.Items[0].Credits != 12 {
+	if !list.Items[0].Settled || list.Items[0].CompletedAt == nil || list.Items[0].Credits != 120 {
 		t.Errorf("settled row = %+v", list.Items[0])
 	}
 	// An in-flight row has no completedAt. It must be nil rather than a zero time - the zero time
@@ -892,7 +892,7 @@ func waitAPI(t *testing.T, status int, hold time.Duration) (*httptest.Server, *[
 		if status == http.StatusOK {
 			// A 200 body is a complete task record, the same shape recordInfo returns.
 			_, _ = w.Write([]byte(`{"code":200,"msg":"success","request_id":"r","data":{
-				"taskId":"task_1","model":"m","state":"succeeded","cost":"0.1200","credits":12,"settled":true,
+				"taskId":"task_1","model":"m","state":"succeeded","cost":"0.1200","credits":120,"settled":true,
 				"createdAt":"2026-09-20T10:00:00Z","completedAt":"2026-09-20T10:00:05Z",
 				"output":{"assets":[{"key":"a","url":"https://cdn.example/a.mp4"}]}}}`))
 			return
@@ -900,7 +900,7 @@ func waitAPI(t *testing.T, status int, hold time.Duration) (*httptest.Server, *[
 		// A 202 body is an acceptance receipt with a quite different shape: it has estimatedCost
 		// and no cost.
 		_, _ = w.Write([]byte(`{"code":200,"msg":"success","request_id":"r","data":{
-			"taskId":"task_1","state":"queued","estimatedCost":"0.1200","estimatedCredits":12,
+			"taskId":"task_1","state":"queued","estimatedCost":"0.1200","estimatedCredits":120,
 			"deadlineAt":"2026-09-20T10:30:00Z"}}`))
 	}))
 	t.Cleanup(server.Close)
@@ -984,7 +984,7 @@ func TestWaitReturnsTheTerminalRecordOn200(t *testing.T) {
 	if result.Task == nil {
 		t.Fatal("a 200 means the task reached a terminal state; Task must carry the record")
 	}
-	if result.Task.State != StateSucceeded || result.Task.Cost != "0.1200" || result.Task.Credits != 12 || !result.Task.Settled {
+	if result.Task.State != StateSucceeded || result.Task.Cost != "0.1200" || result.Task.Credits != 120 || !result.Task.Settled {
 		t.Errorf("task = %+v", result.Task)
 	}
 	if assets := result.Task.ReadyAssets(); len(assets) != 1 {
@@ -1026,7 +1026,7 @@ func TestWaitFallsBackToAcceptanceOn202(t *testing.T) {
 	if result.TaskID != "task_1" || result.State != StateQueued {
 		t.Errorf("result = %+v", result)
 	}
-	if result.EstimatedCost != "0.1200" || result.EstimatedCredits != 12 {
+	if result.EstimatedCost != "0.1200" || result.EstimatedCredits != 120 {
 		t.Errorf("EstimatedCost = %q, EstimatedCredits = %d, want the held estimate on the 202 path",
 			result.EstimatedCost, result.EstimatedCredits)
 	}

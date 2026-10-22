@@ -1,6 +1,6 @@
 # popnow-go
 
-> Go SDK (module `github.com/popnow-ai/popnow-go`, package `popnow`, Go 1.23+, standard library only) for the PopNow API, which generates AI videos, images, music and speech with models such as Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux and Suno. Same credits and prices as popnow.ai (1 credit = $0.01).
+> Go SDK (module `github.com/popnow-ai/popnow-go`, package `popnow`, Go 1.23+, standard library only) for the PopNow API, which generates AI videos, images, music and speech with models such as Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux and Suno. Same credits and prices as popnow.ai (1 credit = $0.001).
 
 Install: `go get github.com/popnow-ai/popnow-go`. Auth: `popnow.New(popnow.Options{APIKey: ...})` or the `POPNOW_API_KEY` environment variable (`sk-popnow-...`, created at https://popnow.ai/api/console/keys). Base URL `https://api.popnow.ai/api/v1`. Every JSON response is `{code, msg, data, request_id}`; `code` 200 is success. Requests carry `User-Agent: popnow-go/<version>`.
 

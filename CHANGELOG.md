@@ -4,6 +4,12 @@ All notable changes to this module are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Docs and the pinned contract describe credits in the current unit (1 credit = $0.001 since 2026-10-19); test fixtures use matching credit and USD pairs. No code change: the SDK reads credit amounts as the API returns them.
+
 ## [0.1.0] - 2026-10-19
 
 First release of the PopNow Go SDK (`github.com/popnow-ai/popnow-go`, package `popnow`).

@@ -18,7 +18,7 @@
 //   - HTTP 202 from task creation means accepted, not finished. Success or
 //     failure is reported by the task's state, read back with GetTask.
 //
-// Billing: 1 credit = $0.01. Amounts are reported both as integer credits
+// Billing: 1 credit = $0.001. Amounts are reported both as integer credits
 // (MaxCredits, EstimatedCredits, Credits, ...) and as the equivalent USD
 // decimal string (MaxCharge, EstimatedCost, Cost, ...).
 //

@@ -233,8 +233,8 @@ func createWithClient(client *Client) (*CreateTaskResult, error) {
 
 func TestQuoteSendsOnlyThePricedFields(t *testing.T) {
 	api := newCaptureAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{
-		"quoteId":"q_1","model":"m","estimatedCost":"0.15","maxCharge":"0.15","maxCredits":15,
-		"expectedCredits":15,"currency":"USD","quantity":"1","unit":"per_image",
+		"quoteId":"q_1","model":"m","estimatedCost":"0.15","maxCharge":"0.15","maxCredits":150,
+		"expectedCredits":150,"currency":"USD","quantity":"1","unit":"per_image",
 		"expiresAt":"2030-01-01T00:00:00Z"}}`)
 	previous := int64(9)
 	quote, err := api.client(t, Options{}).Quote(context.Background(), CreateTaskInput{
@@ -243,7 +243,7 @@ func TestQuoteSendsOnlyThePricedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Quote: %v", err)
 	}
-	if quote.MaxCredits != 15 || quote.ExpectedCredits != 15 || quote.QuoteID != "q_1" {
+	if quote.MaxCredits != 150 || quote.ExpectedCredits != 150 || quote.QuoteID != "q_1" {
 		t.Errorf("quote = %+v", quote)
 	}
 	body := api.seen()[0].Body
@@ -611,7 +611,7 @@ func TestTasksIteratorYieldsTheFailedPage(t *testing.T) {
 func TestWebhookVersion2SignsTheDataTaskID(t *testing.T) {
 	const secret = "callback-secret"
 	body := []byte(`{"code":200,"msg":"success","data":{"taskId":"job_real","model":"m",` +
-		`"state":"succeeded","credits":34,"cost":"0.34","settled":true,` +
+		`"state":"succeeded","credits":340,"cost":"0.34","settled":true,` +
 		`"output":{"assets":[{"url":"https://cdn.example/a.mp4","mime":"video/mp4"}]}},"request_id":"whd_1"}`)
 	now := strconv.FormatInt(time.Now().Unix(), 10)
 
@@ -622,7 +622,7 @@ func TestWebhookVersion2SignsTheDataTaskID(t *testing.T) {
 	if delivery.TaskID != "job_real" || delivery.DeliveryID != "whd_1" || delivery.PayloadVersion != "2" {
 		t.Errorf("delivery = %+v", delivery)
 	}
-	if delivery.Task == nil || delivery.Task.Credits != 34 || len(delivery.Task.ReadyAssets()) != 1 {
+	if delivery.Task == nil || delivery.Task.Credits != 340 || len(delivery.Task.ReadyAssets()) != 1 {
 		t.Errorf("task = %+v", delivery.Task)
 	}
 
@@ -632,7 +632,7 @@ func TestWebhookVersion2SignsTheDataTaskID(t *testing.T) {
 		t.Errorf("a signature over another task ID verified: %v", err)
 	}
 	// A body changed after signing must fail too: the digest covers every byte.
-	tampered := []byte(strings.Replace(string(body), `"credits":34`, `"credits":3400`, 1))
+	tampered := []byte(strings.Replace(string(body), `"credits":340`, `"credits":34000`, 1))
 	if _, err := VerifyWebhook(secret, webhookHeader("2", now, signWebhook(t, secret, "job_real", now, body)), tampered, 0); !errors.Is(err, ErrWebhookSignature) {
 		t.Errorf("a tampered body verified: %v", err)
 	}
@@ -703,10 +703,10 @@ func TestWaitForTerminalWaitsForPendingAssets(t *testing.T) {
 	var polls atomic.Int64
 	api := newCaptureAPI(t,
 		`{"code":200,"msg":"success","request_id":"r","data":{"taskId":"job_1","model":"m","state":"succeeded",
-			"cost":"0.1","credits":10,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
+			"cost":"0.1","credits":100,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
 			"output":{"assets":[{"pending":true}]}}}`,
 		`{"code":200,"msg":"success","request_id":"r","data":{"taskId":"job_1","model":"m","state":"succeeded",
-			"cost":"0.1","credits":10,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
+			"cost":"0.1","credits":100,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
 			"output":{"assets":[{"key":"a","url":"https://cdn.example/a.png"}]}}}`)
 	client := api.client(t, Options{Sleep: func(ctx context.Context, _ time.Duration) error {
 		polls.Add(1)
