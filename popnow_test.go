@@ -231,29 +231,103 @@ func createWithClient(client *Client) (*CreateTaskResult, error) {
 
 // -- Quote and createTask bodies ---------------------------------------------
 
+// quoteBody is a current jobs/quote response: exact USD strings, with the deprecated credit
+// projections still present. The maximum has a fractional credit (0.1505 USD = 150.5 credits),
+// which only the USD fields can carry.
+const quoteBody = `{"code":200,"msg":"success","request_id":"r","data":{
+	"quoteId":"q_1","model":"m","estimatedCost":"0.1505","maxCharge":"0.1505","maxChargeUsd":"0.1505",
+	"expectedChargeUsd":"0.12","expectedCharge":"0.12","maxCredits":151,"expectedCredits":120,
+	"currency":"USD","quantity":"1","unit":"per_image","expiresAt":"2030-01-01T00:00:00Z"}}`
+
 func TestQuoteSendsOnlyThePricedFields(t *testing.T) {
-	api := newCaptureAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{
-		"quoteId":"q_1","model":"m","estimatedCost":"0.15","maxCharge":"0.15","maxCredits":150,
-		"expectedCredits":150,"currency":"USD","quantity":"1","unit":"per_image",
-		"expiresAt":"2030-01-01T00:00:00Z"}}`)
+	api := newCaptureAPI(t, quoteBody)
 	previous := int64(9)
 	quote, err := api.client(t, Options{}).Quote(context.Background(), CreateTaskInput{
-		Model: "m", Input: map[string]any{"prompt": "p"}, QuoteID: "q_old", ExpectedCredits: &previous,
+		Model: "m", Input: map[string]any{"prompt": "p"}, QuoteID: "q_old",
+		ExpectedCostUsd: "0.009", ExpectedCredits: &previous,
 	})
 	if err != nil {
 		t.Fatalf("Quote: %v", err)
 	}
-	if quote.MaxCredits != 150 || quote.ExpectedCredits != 150 || quote.QuoteID != "q_1" {
+	if quote.MaxChargeUsd != "0.1505" || quote.ExpectedChargeUsd != "0.12" || quote.QuoteID != "q_1" ||
+		quote.MaxCharge != "0.1505" || quote.ExpectedCharge != "0.12" || quote.Currency != "USD" {
 		t.Errorf("quote = %+v", quote)
 	}
 	body := api.seen()[0].Body
-	if strings.Contains(body, "q_old") || strings.Contains(body, "expectedCredits") {
-		t.Errorf("a quote request carried an old price confirmation: %s", body)
+	for _, stale := range []string{"q_old", "expectedCredits", "expectedCostUsd", "expectedCost"} {
+		if strings.Contains(body, stale) {
+			t.Errorf("a quote request carried an old price confirmation (%s): %s", stale, body)
+		}
+	}
+}
+
+// TestQuoteLegacyCreditFieldsStillParse keeps the deprecated credit projections readable for code
+// written against 0.1.
+func TestQuoteLegacyCreditFieldsStillParse(t *testing.T) {
+	api := newCaptureAPI(t, quoteBody)
+	quote, err := api.client(t, Options{}).Quote(context.Background(), CreateTaskInput{
+		Model: "m", Input: map[string]any{"prompt": "p"},
+	})
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	if quote.MaxCredits != 151 || quote.ExpectedCredits != 120 {
+		t.Errorf("legacy credit fields = %d / %d, want 151 / 120", quote.MaxCredits, quote.ExpectedCredits)
+	}
+}
+
+// TestWithQuoteConfirmsTheExactUSDMaximum pins what a confirmed submission sends: the quote ID and
+// maxChargeUsd as expectedCostUsd, verbatim, and none of the older confirmations that could
+// contradict it. The typical charge must never be what is confirmed.
+func TestWithQuoteConfirmsTheExactUSDMaximum(t *testing.T) {
+	api := newCaptureAPI(t, quoteBody,
+		`{"code":200,"msg":"success","request_id":"r","data":{"taskId":"t","state":"queued",
+			"estimatedCost":"0.1505","estimatedCostUsd":"0.1505","estimatedCredits":151}}`)
+	client := api.client(t, Options{})
+	stale := int64(9)
+	request := CreateTaskInput{
+		Model: "m", Input: map[string]any{"prompt": "p"}, ExpectedCredits: &stale, ExpectedCost: "0.009",
+	}
+	quote, err := client.Quote(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Quote: %v", err)
+	}
+	confirmed := request.WithQuote(quote)
+	if request.QuoteID != "" || request.ExpectedCredits == nil {
+		t.Error("WithQuote modified the input it was called on instead of returning a copy")
+	}
+	task, err := client.CreateTask(context.Background(), confirmed, "k-1", CreateTaskOptions{})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if task.EstimatedCostUsd != "0.1505" || task.EstimatedCost != "0.1505" || task.EstimatedCredits != 151 {
+		t.Errorf("acceptance = %+v", task)
+	}
+
+	var sent map[string]any
+	if err := json.Unmarshal([]byte(api.seen()[1].Body), &sent); err != nil {
+		t.Fatalf("decode the body: %v", err)
+	}
+	if sent["quoteId"] != "q_1" || sent["expectedCostUsd"] != "0.1505" {
+		t.Errorf("confirmation = quoteId %v, expectedCostUsd %v; want q_1 and the exact maxChargeUsd",
+			sent["quoteId"], sent["expectedCostUsd"])
+	}
+	for _, legacy := range []string{"expectedCredits", "expectedCost"} {
+		if _, ok := sent[legacy]; ok {
+			t.Errorf("the confirmed body still carries %s: %v", legacy, sent)
+		}
+	}
+
+	// An older server that only says maxCharge is confirmed with that same amount.
+	old := (&CreateTaskInput{Model: "m"}).WithQuote(&Quote{QuoteID: "q_2", MaxCharge: "0.2"})
+	if old.QuoteID != "q_2" || old.ExpectedCostUsd != "0.2" {
+		t.Errorf("WithQuote without maxChargeUsd = %+v", old)
 	}
 }
 
 // TestExpectedCreditsZeroIsSent pins why ExpectedCredits is a pointer: 0 is a price that can be
-// confirmed, and an int with omitempty would silently drop it.
+// confirmed, and an int with omitempty would silently drop it. The field is deprecated but still
+// sent exactly as given.
 func TestExpectedCreditsZeroIsSent(t *testing.T) {
 	api := newCaptureAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{"taskId":"t","state":"queued"}}`)
 	zero := int64(0)
@@ -286,6 +360,24 @@ func TestLocalValidationStopsBadRequestsBeforeTheNetwork(t *testing.T) {
 		},
 		"missing idempotency key": func() error {
 			_, err := client.CreateTask(ctx, input, "  ", CreateTaskOptions{})
+			return err
+		},
+		"USD amount in exponent notation": func() error {
+			bad := input
+			bad.ExpectedCostUsd = "1e-05"
+			_, err := client.CreateTask(ctx, bad, "k", CreateTaskOptions{})
+			return err
+		},
+		"USD amount with a currency sign": func() error {
+			bad := input
+			bad.ExpectedCostUsd = "$0.45"
+			_, err := client.CreateTask(ctx, bad, "k", CreateTaskOptions{})
+			return err
+		},
+		"USD amount past nine decimals": func() error {
+			bad := input
+			bad.ExpectedCostUsd = "0.0000000001"
+			_, err := client.CreateTask(ctx, bad, "k", CreateTaskOptions{})
 			return err
 		},
 		"oversized idempotency key": func() error {
@@ -611,7 +703,7 @@ func TestTasksIteratorYieldsTheFailedPage(t *testing.T) {
 func TestWebhookVersion2SignsTheDataTaskID(t *testing.T) {
 	const secret = "callback-secret"
 	body := []byte(`{"code":200,"msg":"success","data":{"taskId":"job_real","model":"m",` +
-		`"state":"succeeded","credits":340,"cost":"0.34","settled":true,` +
+		`"state":"succeeded","credits":340,"cost":"0.34","costUsd":"0.34","settled":true,` +
 		`"output":{"assets":[{"url":"https://cdn.example/a.mp4","mime":"video/mp4"}]}},"request_id":"whd_1"}`)
 	now := strconv.FormatInt(time.Now().Unix(), 10)
 
@@ -622,7 +714,8 @@ func TestWebhookVersion2SignsTheDataTaskID(t *testing.T) {
 	if delivery.TaskID != "job_real" || delivery.DeliveryID != "whd_1" || delivery.PayloadVersion != "2" {
 		t.Errorf("delivery = %+v", delivery)
 	}
-	if delivery.Task == nil || delivery.Task.Credits != 340 || len(delivery.Task.ReadyAssets()) != 1 {
+	if delivery.Task == nil || delivery.Task.CostUsd != "0.34" || delivery.Task.Credits != 340 ||
+		len(delivery.Task.ReadyAssets()) != 1 {
 		t.Errorf("task = %+v", delivery.Task)
 	}
 
@@ -632,7 +725,7 @@ func TestWebhookVersion2SignsTheDataTaskID(t *testing.T) {
 		t.Errorf("a signature over another task ID verified: %v", err)
 	}
 	// A body changed after signing must fail too: the digest covers every byte.
-	tampered := []byte(strings.Replace(string(body), `"credits":340`, `"credits":34000`, 1))
+	tampered := []byte(strings.Replace(string(body), `"costUsd":"0.34"`, `"costUsd":"34.00"`, 1))
 	if _, err := VerifyWebhook(secret, webhookHeader("2", now, signWebhook(t, secret, "job_real", now, body)), tampered, 0); !errors.Is(err, ErrWebhookSignature) {
 		t.Errorf("a tampered body verified: %v", err)
 	}
@@ -661,7 +754,7 @@ func TestEndpointWebhookFollowsStandardWebhooks(t *testing.T) {
 	secret := "whsec_" + base64.StdEncoding.EncodeToString(key)
 	oldKey := []byte("fedcba9876543210fedcba9876543210")
 	body := []byte(`{"type":"task.succeeded","timestamp":"2026-10-19T00:00:00Z",` +
-		`"data":{"object":{"taskId":"job_1","model":"m","state":"succeeded","credits":12}}}`)
+		`"data":{"object":{"taskId":"job_1","model":"m","state":"succeeded","costUsd":"0.012","credits":12}}}`)
 	now := strconv.FormatInt(time.Now().Unix(), 10)
 
 	// During a rotation both the old and the new secret sign; either match is enough.
@@ -671,7 +764,7 @@ func TestEndpointWebhookFollowsStandardWebhooks(t *testing.T) {
 		t.Fatalf("VerifyEndpointWebhook: %v", err)
 	}
 	if event.ID != "msg_1" || event.Type != "task.succeeded" || event.Data.Object == nil ||
-		event.Data.Object.TaskID != "job_1" || event.Data.Object.Credits != 12 || string(event.Raw) != string(body) {
+		event.Data.Object.TaskID != "job_1" || event.Data.Object.CostUsd != "0.012" || string(event.Raw) != string(body) {
 		t.Errorf("event = %+v", event)
 	}
 
@@ -703,10 +796,10 @@ func TestWaitForTerminalWaitsForPendingAssets(t *testing.T) {
 	var polls atomic.Int64
 	api := newCaptureAPI(t,
 		`{"code":200,"msg":"success","request_id":"r","data":{"taskId":"job_1","model":"m","state":"succeeded",
-			"cost":"0.1","credits":100,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
+			"cost":"0.1","costUsd":"0.1","credits":100,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
 			"output":{"assets":[{"pending":true}]}}}`,
 		`{"code":200,"msg":"success","request_id":"r","data":{"taskId":"job_1","model":"m","state":"succeeded",
-			"cost":"0.1","credits":100,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
+			"cost":"0.1","costUsd":"0.1","credits":100,"settled":true,"createdAt":"2026-10-01T00:00:00Z",
 			"output":{"assets":[{"key":"a","url":"https://cdn.example/a.png"}]}}}`)
 	client := api.client(t, Options{Sleep: func(ctx context.Context, _ time.Duration) error {
 		polls.Add(1)

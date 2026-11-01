@@ -1,8 +1,9 @@
 // Package popnow is the Go client for the PopNow API.
 //
 // PopNow is a browser-based AI studio for videos, images and music. Its
-// developer API serves the same image, video and audio models, prices and
-// credit wallet as https://popnow.ai. This package covers the asynchronous
+// developer API serves the same image, video and audio models at the same
+// prices as https://popnow.ai, billed in USD from a separate API balance.
+// This package covers the asynchronous
 // media workflow end to end: discover a model and its input schema, upload
 // local reference material, quote a request, submit it, wait for a terminal
 // state, collect the result, keep it in the asset library, and verify the
@@ -18,9 +19,14 @@
 //   - HTTP 202 from task creation means accepted, not finished. Success or
 //     failure is reported by the task's state, read back with GetTask.
 //
-// Billing: 1 credit = $0.001. Amounts are reported both as integer credits
-// (MaxCredits, EstimatedCredits, Credits, ...) and as the equivalent USD
-// decimal string (MaxCharge, EstimatedCost, Cost, ...).
+// Billing: API calls spend USD from the API balance behind the key, which is
+// separate from the website's credits (add funds at
+// https://popnow.ai/api/console/billing). Every amount is an exact USD decimal
+// string with up to nine decimal places (MaxChargeUsd, EstimatedCostUsd,
+// CostUsd, AvailableUsd, ...); keep it a string rather than a float. Confirm a
+// quoted price with CreateTaskInput.WithQuote. The integer credit fields
+// (MaxCredits, EstimatedCredits, Credits, ...) are deprecated display
+// projections at 1 credit = $0.001.
 //
 // The contract this package is written against is published at
 // https://popnow.ai/docs/openapi.yaml.
@@ -41,7 +47,7 @@ import (
 // Keep it equal to the git tag it ships under, without the leading v. A tagged
 // module exposes its version only to the programs that depend on it, never to
 // itself, so nothing can read it back at run time.
-const Version = "0.1.0"
+const Version = "0.2.0"
 
 // UserAgent identifies this client on every API request.
 //
@@ -128,7 +134,8 @@ const (
 //	40004  the request is valid but no deployment serves this exact
 //	       combination of settings right now. Not retryable: change the
 //	       parameter named in the message, or pick another model.
-//	40201  not enough credits for this task's hold. Buy credits, then resend.
+//	40201  the available API balance cannot cover this task's USD hold. Add
+//	       funds at https://popnow.ai/api/console/billing, then resend.
 //	40202  a key spend cap was reached.
 //	40301  this key may not call this model.
 //	40302  the caller's address is outside this key's IP allow-list.
@@ -152,7 +159,7 @@ const (
 	CodeUploadMismatch         = 40003
 	CodeUnsupportedCombination = 40004
 	CodeUnauthorized           = 401
-	CodeInsufficientCredits    = 40201
+	CodeInsufficientBalance    = 40201
 	CodeSpendCapReached        = 40202
 	CodeForbidden              = 403
 	CodeModelNotAllowed        = 40301
@@ -169,6 +176,12 @@ const (
 	CodeModelUnavailable       = 50301
 	CodeGenerationRefunded     = 50302
 )
+
+// CodeInsufficientCredits is the old name of CodeInsufficientBalance.
+//
+// Deprecated: use CodeInsufficientBalance. API calls are paid from a USD
+// balance, not credits.
+const CodeInsufficientCredits = CodeInsufficientBalance
 
 // retryableHTTP holds the statuses worth another attempt when the response
 // body is not the envelope at all, for example an edge network error page.

@@ -7,20 +7,36 @@ import (
 	"time"
 )
 
-// Balance is what this account can spend right now, in credits and in USD
-// decimal strings. Amounts are never floats: cents do not survive binary
-// floating point.
+// Balance is the API balance behind this key: an independent USD wallet,
+// separate from the credits used on popnow.ai. Amounts are exact USD decimal
+// strings with up to nine decimal places, never floats: binary floating point
+// does not hold them exactly.
 type Balance struct {
-	// AvailableCredits is what a new task can draw on (rounded down to a whole
-	// credit), HeldCredits what accepted tasks have already reserved, and
-	// TotalCredits the two together.
-	AvailableCredits int64 `json:"availableCredits"`
-	HeldCredits      int64 `json:"heldCredits"`
-	TotalCredits     int64 `json:"totalCredits"`
-	// Available, Held and Total are the same amounts in USD.
+	// AvailableUsd is what a new task can draw on, HeldUsd what accepted
+	// tasks have already reserved, and TotalUsd the two together.
+	// AvailableUsd can be negative on an account with approved credit.
+	AvailableUsd string `json:"availableUsd"`
+	HeldUsd      string `json:"heldUsd"`
+	TotalUsd     string `json:"totalUsd"`
+	// Available, Held and Total are older names for the same USD amounts.
 	Available string `json:"available"`
 	Held      string `json:"held"`
 	Total     string `json:"total"`
+
+	// AvailableCredits is AvailableUsd truncated to whole credits at
+	// 1 credit = $0.001, kept for display compatibility only.
+	//
+	// Deprecated: use AvailableUsd.
+	AvailableCredits int64 `json:"availableCredits"`
+	// HeldCredits is HeldUsd rounded up to whole credits.
+	//
+	// Deprecated: use HeldUsd.
+	HeldCredits int64 `json:"heldCredits"`
+	// TotalCredits is the sum of the two credit figures, not an exact
+	// balance.
+	//
+	// Deprecated: use TotalUsd.
+	TotalCredits int64 `json:"totalCredits"`
 	// Funding breaks the balance down by where the money came from. It is
 	// absent on accounts with nothing but a plain wallet.
 	Funding *FundingOverview `json:"funding,omitempty"`
@@ -75,8 +91,13 @@ type FundingGrant struct {
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
-// GetBalance reads the available, held and total balance of this account.
-// API calls and generations on popnow.ai share this one wallet.
+// GetBalance reads the available, held and total USD of the API balance.
+//
+// Only API funds count here. API-key calls, the developer MCP and API
+// Playground runs spend this balance; generations on popnow.ai spend website
+// credits, which are separate and cannot be moved into it. Add funds at
+// https://popnow.ai/api/console/billing. The path name /chat/credit is
+// historical.
 func (c *Client) GetBalance(ctx context.Context) (*Balance, error) {
 	out := &Balance{}
 	if err := c.do(ctx, request{method: http.MethodGet, path: "/chat/credit", replayable: true, out: out}); err != nil {
@@ -91,8 +112,12 @@ type UsageDay struct {
 	Calls     int64  `json:"calls"`
 	Succeeded int64  `json:"succeeded"`
 	Failed    int64  `json:"failed"`
-	Credits   int64  `json:"credits"`
-	Spend     string `json:"spend"`
+	// Spend is the settled USD charge, an exact decimal string.
+	Spend string `json:"spend"`
+	// Credits is Spend rounded up to whole credits at 1 credit = $0.001.
+	//
+	// Deprecated: use Spend.
+	Credits int64 `json:"credits"`
 }
 
 // UsageModel is one model's share of the same window.
@@ -101,8 +126,12 @@ type UsageModel struct {
 	Calls     int64  `json:"calls"`
 	Succeeded int64  `json:"succeeded"`
 	Failed    int64  `json:"failed"`
-	Credits   int64  `json:"credits"`
-	Spend     string `json:"spend"`
+	// Spend is the settled USD charge, an exact decimal string.
+	Spend string `json:"spend"`
+	// Credits is Spend rounded up to whole credits at 1 credit = $0.001.
+	//
+	// Deprecated: use Spend.
+	Credits int64 `json:"credits"`
 }
 
 // UsageReport is settled spend and call counts over one window.
@@ -112,10 +141,15 @@ type UsageReport struct {
 	From     string `json:"from"`
 	To       string `json:"to"`
 	Currency string `json:"currency"`
-	// TotalCredits and TotalSpend count settled charges only, never holds.
-	TotalCalls   int64  `json:"totalCalls"`
-	TotalCredits int64  `json:"totalCredits"`
-	TotalSpend   string `json:"totalSpend"`
+	// TotalSpend is the settled USD spend, an exact decimal string. It
+	// counts settled charges only, never holds.
+	TotalCalls int64  `json:"totalCalls"`
+	TotalSpend string `json:"totalSpend"`
+	// TotalCredits is TotalSpend rounded up to whole credits at
+	// 1 credit = $0.001.
+	//
+	// Deprecated: use TotalSpend.
+	TotalCredits int64 `json:"totalCredits"`
 	// Days and Models are sparse: a day or a model with no activity is absent.
 	Days   []UsageDay   `json:"days"`
 	Models []UsageModel `json:"models"`

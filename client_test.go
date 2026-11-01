@@ -492,7 +492,8 @@ func businessFailureAPI(t *testing.T, code int, msg string) *Client {
 
 func TestGetBalance(t *testing.T) {
 	api := newRecordingAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{
-		"available":"12.3456","held":"0.5000","total":"12.8456",
+		"availableUsd":"12.345678901","heldUsd":"0.5","totalUsd":"12.845678901",
+		"available":"12.345678901","held":"0.5","total":"12.845678901",
 		"availableCredits":12345,"heldCredits":500,"totalCredits":12845,
 		"funding":{"balanceUsd":"10.0000","heldUsd":"0.5000",
 			"prepaidAvailableUsd":"10.0000","grantAvailableUsd":"2.3456",
@@ -512,9 +513,15 @@ func TestGetBalance(t *testing.T) {
 	if got := api.seen(); len(got) != 1 || got[0] != "GET /chat/credit" {
 		t.Errorf("requests = %v, want one GET /chat/credit", got)
 	}
-	if balance.Available != "12.3456" || balance.Held != "0.5000" || balance.Total != "12.8456" {
+	// Nine decimal places must arrive digit for digit: the amounts are strings precisely so that
+	// nothing rounds them on the way.
+	if balance.AvailableUsd != "12.345678901" || balance.HeldUsd != "0.5" || balance.TotalUsd != "12.845678901" {
 		t.Errorf("balance = %+v", balance)
 	}
+	if balance.Available != balance.AvailableUsd || balance.Held != balance.HeldUsd || balance.Total != balance.TotalUsd {
+		t.Errorf("the older USD names disagree with the current ones: %+v", balance)
+	}
+	// The deprecated credit projections still decode for code written against 0.1.
 	if balance.AvailableCredits != 12345 || balance.HeldCredits != 500 || balance.TotalCredits != 12845 {
 		t.Errorf("balance credits = %+v", balance)
 	}
@@ -577,7 +584,7 @@ func TestGetUsage(t *testing.T) {
 	if got := api.seen(); len(got) != 1 || got[0] != "GET /usage?from=2026-09-01&to=2026-09-08" {
 		t.Errorf("requests = %v", got)
 	}
-	if usage.TotalCalls != 42 || usage.TotalSpend != "3.1400" || usage.TotalCredits != 3140 || usage.Currency != "USD" {
+	if usage.TotalCalls != 42 || usage.TotalSpend != "3.1400" || usage.Currency != "USD" {
 		t.Errorf("usage = %+v", usage)
 	}
 	// The window the server chose must be readable: with From and To unset it picks its own, and
@@ -588,8 +595,12 @@ func TestGetUsage(t *testing.T) {
 	if len(usage.Days) != 1 || usage.Days[0].Failed != 1 {
 		t.Errorf("days = %+v", usage.Days)
 	}
-	if len(usage.Models) != 1 || usage.Models[0].Spend != "2.9400" || usage.Models[0].Credits != 2940 {
+	if len(usage.Models) != 1 || usage.Models[0].Spend != "2.9400" {
 		t.Errorf("models = %+v", usage.Models)
+	}
+	// The deprecated credit projections still decode.
+	if usage.TotalCredits != 3140 || usage.Days[0].Credits != 200 || usage.Models[0].Credits != 2940 {
+		t.Errorf("legacy usage credits = %d / %d / %d", usage.TotalCredits, usage.Days[0].Credits, usage.Models[0].Credits)
 	}
 }
 
@@ -645,7 +656,8 @@ func TestListTasks(t *testing.T) {
 	if !list.HasMore || list.NextCursor != "cur_page2" {
 		t.Errorf("hasMore = %v, nextCursor = %q", list.HasMore, list.NextCursor)
 	}
-	if !list.Items[0].Settled || list.Items[0].CompletedAt == nil || list.Items[0].Credits != 120 {
+	if !list.Items[0].Settled || list.Items[0].CompletedAt == nil || list.Items[0].Cost != "0.1200" ||
+		list.Items[0].Credits != 120 {
 		t.Errorf("settled row = %+v", list.Items[0])
 	}
 	// An in-flight row has no completedAt. It must be nil rather than a zero time - the zero time
@@ -892,7 +904,8 @@ func waitAPI(t *testing.T, status int, hold time.Duration) (*httptest.Server, *[
 		if status == http.StatusOK {
 			// A 200 body is a complete task record, the same shape recordInfo returns.
 			_, _ = w.Write([]byte(`{"code":200,"msg":"success","request_id":"r","data":{
-				"taskId":"task_1","model":"m","state":"succeeded","cost":"0.1200","credits":120,"settled":true,
+				"taskId":"task_1","model":"m","state":"succeeded","cost":"0.12","costUsd":"0.12",
+				"credits":120,"exactCredits":"120","settled":true,
 				"createdAt":"2026-09-20T10:00:00Z","completedAt":"2026-09-20T10:00:05Z",
 				"output":{"assets":[{"key":"a","url":"https://cdn.example/a.mp4"}]}}}`))
 			return
@@ -900,8 +913,8 @@ func waitAPI(t *testing.T, status int, hold time.Duration) (*httptest.Server, *[
 		// A 202 body is an acceptance receipt with a quite different shape: it has estimatedCost
 		// and no cost.
 		_, _ = w.Write([]byte(`{"code":200,"msg":"success","request_id":"r","data":{
-			"taskId":"task_1","state":"queued","estimatedCost":"0.1200","estimatedCredits":120,
-			"deadlineAt":"2026-09-20T10:30:00Z"}}`))
+			"taskId":"task_1","state":"queued","estimatedCost":"0.12","estimatedCostUsd":"0.12",
+			"estimatedCredits":120,"deadlineAt":"2026-09-20T10:30:00Z"}}`))
 	}))
 	t.Cleanup(server.Close)
 	return server, &queries
@@ -984,7 +997,8 @@ func TestWaitReturnsTheTerminalRecordOn200(t *testing.T) {
 	if result.Task == nil {
 		t.Fatal("a 200 means the task reached a terminal state; Task must carry the record")
 	}
-	if result.Task.State != StateSucceeded || result.Task.Cost != "0.1200" || result.Task.Credits != 120 || !result.Task.Settled {
+	if result.Task.State != StateSucceeded || result.Task.CostUsd != "0.12" || result.Task.Cost != "0.12" ||
+		result.Task.Credits != 120 || !result.Task.Settled {
 		t.Errorf("task = %+v", result.Task)
 	}
 	if assets := result.Task.ReadyAssets(); len(assets) != 1 {
@@ -997,13 +1011,13 @@ func TestWaitReturnsTheTerminalRecordOn200(t *testing.T) {
 	if result.InFlight() {
 		t.Error("InFlight() is true on a terminal result")
 	}
-	// estimatedCost does not exist in a task record at all (there it is called cost), so it is
-	// necessarily empty. What this pins is that the emptiness is the contract rather than a bug -
-	// the real number is on Task.Cost, as documented, and nobody should conclude the quote was
+	// estimatedCostUsd does not exist in a task record at all (there it is called costUsd), so it
+	// is necessarily empty. What this pins is that the emptiness is the contract rather than a bug -
+	// the real number is on Task.CostUsd, as documented, and nobody should conclude the quote was
 	// lost.
-	if result.EstimatedCost != "" || result.EstimatedCredits != 0 {
-		t.Errorf("EstimatedCost = %q, EstimatedCredits = %d; a finished task reports a real cost, not an estimate",
-			result.EstimatedCost, result.EstimatedCredits)
+	if result.EstimatedCostUsd != "" || result.EstimatedCost != "" || result.EstimatedCredits != 0 {
+		t.Errorf("EstimatedCostUsd = %q, EstimatedCredits = %d; a finished task reports a real cost, not an estimate",
+			result.EstimatedCostUsd, result.EstimatedCredits)
 	}
 }
 
@@ -1026,9 +1040,9 @@ func TestWaitFallsBackToAcceptanceOn202(t *testing.T) {
 	if result.TaskID != "task_1" || result.State != StateQueued {
 		t.Errorf("result = %+v", result)
 	}
-	if result.EstimatedCost != "0.1200" || result.EstimatedCredits != 120 {
-		t.Errorf("EstimatedCost = %q, EstimatedCredits = %d, want the held estimate on the 202 path",
-			result.EstimatedCost, result.EstimatedCredits)
+	if result.EstimatedCostUsd != "0.12" || result.EstimatedCost != "0.12" || result.EstimatedCredits != 120 {
+		t.Errorf("EstimatedCostUsd = %q, EstimatedCredits = %d, want the held estimate on the 202 path",
+			result.EstimatedCostUsd, result.EstimatedCredits)
 	}
 	if !result.InFlight() {
 		t.Error("InFlight() is false on a queued result")
@@ -1216,6 +1230,9 @@ func TestGetModelReadsTheToolkit(t *testing.T) {
 	api := newRecordingAPI(t, `{"code":200,"msg":"success","request_id":"r","data":{
 		"model":"popnow/background-remover-v1/edit","family":"background-remover/v1",
 		"modality":"image","tasks":["image-edit"],"toolkit":"studio-tools",
+		"usd":{"unit":"per_image","perUnit":"0.0015","currency":"USD",
+			"blocks":{"seconds":5,"min":1,"cap":4},
+			"rules":[{"when":{"resolution":"4k"},"perUnit":"0.003"}]},
 		"credits":{"unit":"per_image","perUnit":1.5,"rules":[{"when":{"resolution":"4k"},"perUnit":3}]}}}`)
 
 	model, err := api.client(t).GetModel(context.Background(), "popnow/background-remover-v1/edit")
@@ -1225,7 +1242,17 @@ func TestGetModelReadsTheToolkit(t *testing.T) {
 	if model.Toolkit != "studio-tools" || len(model.Tasks) != 1 || model.Tasks[0] != "image-edit" {
 		t.Errorf("model = %+v", model)
 	}
-	// Prices are credits and can be fractional; an int field would silently drop the half.
+	// USD prices are exact decimal strings, kept digit for digit.
+	usd := model.Usd
+	if usd == nil || usd.Unit != "per_image" || usd.PerUnit != "0.0015" || usd.Currency != "USD" ||
+		len(usd.Rules) != 1 || usd.Rules[0].PerUnit != "0.003" || usd.Rules[0].When["resolution"] != "4k" {
+		t.Fatalf("usd = %+v", usd)
+	}
+	if usd.Blocks == nil || usd.Blocks.Seconds != 5 || usd.Blocks.Min != 1 || usd.Blocks.Cap != 4 {
+		t.Errorf("usd blocks = %+v", usd.Blocks)
+	}
+	// The deprecated credit snapshot still decodes, fractional values included; an int field would
+	// silently drop the half.
 	if model.Credits == nil || model.Credits.PerUnit != 1.5 || len(model.Credits.Rules) != 1 ||
 		model.Credits.Rules[0].PerUnit != 3 || model.Credits.Rules[0].When["resolution"] != "4k" {
 		t.Errorf("credits = %+v", model.Credits)

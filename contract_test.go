@@ -22,6 +22,10 @@ import (
 // It compares against a pinned copy (contracts/openapi.yaml) and, when the network allows, checks
 // that the pinned copy still equals https://popnow.ai/docs/openapi.yaml. Both are public, so CI
 // needs no credentials. Set POPNOW_SKIP_LIVE_CONTRACT=1 to skip the live comparison.
+//
+// The pinned copy leaves out the lines the repository guard does not allow in this repository (a
+// few catalogue model identifiers in one enum); the live copy is filtered the same way before the
+// two are compared, so the check still notices every other change.
 func TestContractHasNotDrifted(t *testing.T) {
 	raw, err := os.ReadFile("contracts/openapi.yaml")
 	if err != nil {
@@ -34,7 +38,8 @@ func TestContractHasNotDrifted(t *testing.T) {
 			t.Fatalf("contracts/openapi.yaml is stale against the published contract.\n" +
 				"refresh it:  curl -sH 'User-Agent: popnow-go-contract-check' " +
 				"https://popnow.ai/docs/openapi.yaml | sed '/^#/d' > contracts/openapi.yaml\n" +
-				"then re-check every constant this package hard-codes against that diff")
+				"then delete the lines TestRepositoryIsEnglishAndNamesOnlyPopNow reports, and\n" +
+				"re-check every constant this package hard-codes against that diff")
 		}
 	}
 
@@ -53,7 +58,7 @@ func TestContractHasNotDrifted(t *testing.T) {
 
 	codes := []int{
 		CodeBadRequest, CodeUploadMismatch, CodeUnsupportedCombination, CodeUnauthorized,
-		CodeInsufficientCredits, CodeSpendCapReached, CodeForbidden, CodeModelNotAllowed,
+		CodeInsufficientBalance, CodeSpendCapReached, CodeForbidden, CodeModelNotAllowed,
 		CodeIPNotAllowed, CodeRegionUnavailable, CodeEmailNotVerified, CodeNotFound, CodeConflict,
 		CodeQuoteRejected, CodePayloadTooLarge, CodeRateLimited, CodeServerError,
 		CodeDependencyUnavailable, CodeModelUnavailable, CodeGenerationRefunded,
@@ -140,7 +145,20 @@ func fetchLiveContract(t *testing.T) (string, bool) {
 		}
 		text = text[end+1:]
 	}
-	return text, true
+	return withoutForeignNames(text), true
+}
+
+// withoutForeignNames drops every line the repository guard would reject, which is exactly what
+// the pinned copy leaves out.
+func withoutForeignNames(text string) string {
+	lines := strings.SplitAfter(text, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if !foreignNamePattern.MatchString(line) {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "")
 }
 
 // yamlBlock returns the text from start up to the next occurrence of next, so lookups stay inside

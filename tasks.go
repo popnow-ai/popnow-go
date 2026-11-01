@@ -8,10 +8,15 @@ import (
 	"iter"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// usdAmountPattern is the contract's shape for a USD amount you send: digits,
+// optionally a point and one to nine decimals. No sign, no exponent.
+var usdAmountPattern = regexp.MustCompile(`^[0-9]+(\.[0-9]{1,9})?$`)
 
 // CreateTaskInput is the body shared by Quote and CreateTask.
 type CreateTaskInput struct {
@@ -26,16 +31,47 @@ type CreateTaskInput struct {
 	// CallBackURL is an optional public HTTPS endpoint for terminal delivery.
 	// Verify every delivery with VerifyWebhook before acting on it.
 	CallBackURL string `json:"callBackUrl,omitempty"`
-	// QuoteID together with ExpectedCredits (or ExpectedCost) confirms a
-	// price: if the price moved since the quote was signed, the task is
-	// rejected with code 40901 instead of being accepted at the new amount.
+	// QuoteID confirms a price on its own or together with ExpectedCostUsd:
+	// if the price moved since the quote was signed, the task is rejected with
+	// code 40901 instead of being accepted at the new amount. WithQuote fills
+	// both from a Quote.
 	QuoteID string `json:"quoteId,omitempty"`
-	// ExpectedCredits is the confirmed number of credits to hold, as returned
-	// in Quote.MaxCredits. It is a pointer because 0 is a real amount. When
-	// both are set, ExpectedCredits wins over ExpectedCost.
+	// ExpectedCostUsd is the exact USD hold you confirm, as a decimal string
+	// with up to nine decimal places and no exponent: send Quote.MaxChargeUsd,
+	// never the typical ExpectedChargeUsd. A different price returns 40901
+	// before anything is held.
+	ExpectedCostUsd string `json:"expectedCostUsd,omitempty"`
+
+	// ExpectedCredits is the old integer confirmation (1 credit = $0.001).
+	// It never overrides a USD amount and cannot express a fractional-credit
+	// price.
+	//
+	// Deprecated: send ExpectedCostUsd (or QuoteID alone) instead.
 	ExpectedCredits *int64 `json:"expectedCredits,omitempty"`
-	// ExpectedCost is the same confirmation as a USD decimal string.
+	// ExpectedCost is the legacy name of ExpectedCostUsd. When both are set
+	// they must carry the same USD amount.
+	//
+	// Deprecated: use ExpectedCostUsd.
 	ExpectedCost string `json:"expectedCost,omitempty"`
+}
+
+// WithQuote returns a copy of in that confirms quote's maximum hold: it sets
+// QuoteID and ExpectedCostUsd from Quote.MaxChargeUsd, and clears the
+// deprecated ExpectedCredits and ExpectedCost so that no older confirmation
+// can contradict the quote. Submit it before Quote.ExpiresAt.
+func (in CreateTaskInput) WithQuote(quote *Quote) CreateTaskInput {
+	if quote == nil {
+		return in
+	}
+	in.QuoteID = quote.QuoteID
+	in.ExpectedCostUsd = quote.MaxChargeUsd
+	if in.ExpectedCostUsd == "" {
+		// MaxCharge is the same exact amount under its older name.
+		in.ExpectedCostUsd = quote.MaxCharge
+	}
+	in.ExpectedCredits = nil
+	in.ExpectedCost = ""
+	return in
 }
 
 // validate is the local check shared by Quote and CreateTask.
@@ -48,6 +84,11 @@ func (in CreateTaskInput) validate() error {
 	}
 	if in.ExpectedCredits != nil && *in.ExpectedCredits < 0 {
 		return errors.New("popnow: input.ExpectedCredits must not be negative")
+	}
+	if in.ExpectedCostUsd != "" && !usdAmountPattern.MatchString(in.ExpectedCostUsd) {
+		// A float formatted with %v ("1e-05") or with a currency sign is the usual mistake; the
+		// server would reject it too, with a less specific message.
+		return fmt.Errorf("popnow: input.ExpectedCostUsd must be a USD decimal string such as \"0.45\" (up to nine decimal places, no exponent), got %q", in.ExpectedCostUsd)
 	}
 	if in.CallBackURL != "" {
 		parsed, err := url.Parse(in.CallBackURL)
@@ -62,22 +103,40 @@ func (in CreateTaskInput) validate() error {
 
 // Quote is a signed price for one exact request. It reserves nothing and
 // guarantees no capacity; it only fixes the price for five minutes.
+//
+// Every amount is an exact USD decimal string with up to nine decimal places.
+// Keep it a string: binary floating point does not hold such amounts exactly.
 type Quote struct {
-	// QuoteID goes back to CreateTask together with MaxCredits.
+	// QuoteID goes back to CreateTask together with MaxChargeUsd; see
+	// CreateTaskInput.WithQuote.
 	QuoteID string `json:"quoteId"`
 	// Model is the resolved endpoint identifier.
 	Model string `json:"model"`
-	// MaxCredits is the most this request can cost, in credits. It is held
-	// when the task is accepted. Pass it back as ExpectedCredits.
+	// MaxChargeUsd is the most this request can cost, and the amount held
+	// from the API balance when the task is accepted. Confirm it as
+	// CreateTaskInput.ExpectedCostUsd.
+	MaxChargeUsd string `json:"maxChargeUsd"`
+	// ExpectedChargeUsd is what the request typically costs. It equals
+	// MaxChargeUsd unless the final charge depends on the output, and it is
+	// never above it. It is informational: do not confirm with it.
+	ExpectedChargeUsd string `json:"expectedChargeUsd"`
+	// EstimatedCost and MaxCharge are older names for MaxChargeUsd, and
+	// ExpectedCharge for ExpectedChargeUsd. They carry the same values.
+	EstimatedCost  string `json:"estimatedCost"`
+	MaxCharge      string `json:"maxCharge"`
+	ExpectedCharge string `json:"expectedCharge"`
+	// Currency is always USD.
+	Currency string `json:"currency"`
+
+	// MaxCredits is MaxChargeUsd rounded up to whole credits at 1 credit =
+	// $0.001, kept for display compatibility only.
+	//
+	// Deprecated: use MaxChargeUsd.
 	MaxCredits int64 `json:"maxCredits"`
-	// ExpectedCredits is what the request usually costs. It equals MaxCredits
-	// unless the final charge depends on the output, and the charge never
-	// exceeds MaxCredits.
+	// ExpectedCredits is ExpectedChargeUsd rounded up to whole credits.
+	//
+	// Deprecated: use ExpectedChargeUsd.
 	ExpectedCredits int64 `json:"expectedCredits"`
-	// EstimatedCost and MaxCharge are the same amounts as USD decimal strings.
-	EstimatedCost string `json:"estimatedCost"`
-	MaxCharge     string `json:"maxCharge"`
-	Currency      string `json:"currency"`
 	// Quantity and Unit explain how the amount was reached.
 	Quantity  string    `json:"quantity"`
 	Unit      string    `json:"unit"`
@@ -85,12 +144,12 @@ type Quote struct {
 }
 
 // Quote prices one exact request for five minutes without creating a task,
-// holding credits or starting anything. It runs the same validation and
+// holding funds or starting anything. It runs the same validation and
 // admission rules as CreateTask, so it is also the cheapest way to find out
 // that an input is wrong.
 //
-// Pass the returned QuoteID and MaxCredits to CreateTask to refuse a price
-// that moved in the meantime.
+// Submit input.WithQuote(quote) to CreateTask to refuse a price that moved in
+// the meantime: it sends QuoteID and ExpectedCostUsd = MaxChargeUsd.
 func (c *Client) Quote(ctx context.Context, input CreateTaskInput) (*Quote, error) {
 	if err := input.validate(); err != nil {
 		return nil, err
@@ -100,7 +159,7 @@ func (c *Client) Quote(ctx context.Context, input CreateTaskInput) (*Quote, erro
 	// price moved.
 	body := CreateTaskInput{Model: input.Model, Input: input.Input, CallBackURL: input.CallBackURL}
 	out := &Quote{}
-	// A quote creates no task and holds no credits, so retrying is safe.
+	// A quote creates no task and holds no funds, so retrying is safe.
 	if err := c.do(ctx, request{method: http.MethodPost, path: "/jobs/quote", body: body, replayable: true, out: out}); err != nil {
 		return nil, err
 	}
@@ -143,14 +202,19 @@ type CreateTaskResult struct {
 	// State is queued for a new submission. An idempotent replay reports the
 	// original task's current state instead, which may already be terminal.
 	State string `json:"state"`
-	// EstimatedCredits is the number of credits held, and the ceiling on the
-	// final charge. EstimatedCost is the same amount in USD. Unused credits
-	// are released when the task settles.
+	// EstimatedCostUsd is the exact USD held from the API balance, and the
+	// ceiling on the final charge. EstimatedCost is its older name. Unused
+	// funds are released when the task settles.
 	//
-	// Both are zero when Task is non-nil: a task that already finished has a
-	// real cost instead of an estimate, in Task.Credits and Task.Cost.
-	EstimatedCredits int64  `json:"estimatedCredits"`
+	// Both are empty when Task is non-nil: a task that already finished has a
+	// real cost instead of an estimate, in Task.CostUsd.
+	EstimatedCostUsd string `json:"estimatedCostUsd"`
 	EstimatedCost    string `json:"estimatedCost"`
+	// EstimatedCredits is EstimatedCostUsd rounded up to whole credits at
+	// 1 credit = $0.001, kept for display compatibility only.
+	//
+	// Deprecated: use EstimatedCostUsd.
+	EstimatedCredits int64 `json:"estimatedCredits"`
 	// DeadlineAt is the server's execution deadline, fixed at acceptance. It
 	// is not a local wait bound and not an artefact expiry.
 	DeadlineAt time.Time `json:"deadlineAt"`
@@ -181,7 +245,7 @@ type RetryTaskResult struct {
 // CreateTask submits a generation and returns as soon as it is accepted.
 //
 // Acceptance is not completion. The returned state is queued; read the outcome
-// back with GetTask or WaitForTerminal. EstimatedCredits is held, not charged,
+// back with GetTask or WaitForTerminal. EstimatedCostUsd is held, not charged,
 // and it is also the ceiling: the settled charge can only be lower.
 //
 // idempotencyKey is required by this client even though the contract allows
@@ -385,13 +449,18 @@ type Task struct {
 	ErrorCode string `json:"errorCode,omitempty"`
 	// ErrorMessage explains the failure. Do not parse it.
 	ErrorMessage string `json:"errorMessage,omitempty"`
-	// Credits and Cost are the same amount: the final charge once Settled is
-	// true, and the held estimate before that. A failed or expired task
-	// normally releases its hold in full; read them once Settled is true
-	// instead of assuming.
-	Credits int64  `json:"credits"`
+	// CostUsd is the exact USD amount: the final charge once Settled is
+	// true, and the held estimate before that. Cost is its older name. A
+	// failed or expired task normally releases its hold in full; read it once
+	// Settled is true instead of assuming.
+	CostUsd string `json:"costUsd"`
 	Cost    string `json:"cost"`
 	Settled bool   `json:"settled"`
+	// Credits is CostUsd rounded up to whole credits at 1 credit = $0.001,
+	// kept for display compatibility only.
+	//
+	// Deprecated: use CostUsd.
+	Credits int64 `json:"credits"`
 
 	CreatedAt        time.Time      `json:"createdAt"`
 	DeadlineAt       *time.Time     `json:"deadlineAt,omitempty"`
@@ -628,11 +697,16 @@ type TaskListItem struct {
 	RequestID string `json:"requestId,omitempty"`
 	Model     string `json:"model"`
 	State     string `json:"state"`
-	// Credits and Cost are the final charge once Settled is true, and the
-	// held estimate before that.
+	// Cost is the exact USD amount: the final charge once Settled is true,
+	// and the held estimate before that. History rows carry it under this
+	// name only.
+	Cost    string `json:"cost"`
+	Settled bool   `json:"settled"`
+	// Credits is Cost rounded up to whole credits at 1 credit = $0.001, kept
+	// for display compatibility only.
+	//
+	// Deprecated: use Cost.
 	Credits    int64     `json:"credits"`
-	Cost       string    `json:"cost"`
-	Settled    bool      `json:"settled"`
 	CreatedAt  time.Time `json:"createdAt"`
 	DeadlineAt time.Time `json:"deadlineAt"`
 	// CompletedAt is nil while the task is still in flight.

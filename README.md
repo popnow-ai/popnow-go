@@ -9,7 +9,7 @@
 
   <h1>PopNow Go SDK: AI Video, Image and Music Generation API for Go</h1>
 
-  <p><strong>popnow-go</strong> is a zero-dependency Go client for the PopNow API that turns text, images and audio into AI videos, images, music and speech, using the same models, prices and credits as <a href="https://popnow.ai">popnow.ai</a>.</p>
+  <p><strong>popnow-go</strong> is a zero-dependency Go client for the PopNow API that turns text, images and audio into AI videos, images, music and speech, using the same models and prices as <a href="https://popnow.ai">popnow.ai</a>, billed in exact USD from your API balance.</p>
 
   <p>
     <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
@@ -21,11 +21,12 @@
   </p>
 </div>
 
-PopNow is a browser-based AI studio for videos, images and music: image-to-video, text-to-video, AI images, music and speech, one-tap trending video effects and image styles. This package wraps its developer API (`https://api.popnow.ai/api/v1`) so you can call Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux, Suno and more from Go. Credit packs, no subscription; failed runs are refunded. *Make it pop.*
+PopNow is a browser-based AI studio for videos, images and music: image-to-video, text-to-video, AI images, music and speech, one-tap trending video effects and image styles. This package wraps its developer API (`https://api.popnow.ai/api/v1`) so you can call Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux, Suno and more from Go. Pay per call in USD from your [API balance](https://popnow.ai/docs/billing), no subscription; failed or expired tasks release their hold in full. *Make it pop.*
 
 - **Standard library only.** Go 1.23+, no third-party modules in your dependency graph.
 - **Safe retries.** Back-off with jitter on `429` / `500` / `503`, honouring `Retry-After`, and only for requests that cannot charge twice: task submissions require an `Idempotency-Key`.
-- **The whole task workflow.** Quote, create (optionally waiting server-side), poll with back-off, retry, purge, task history with a cursor iterator, usage and balance.
+- **The whole task workflow.** Quote, confirm the exact USD hold, create (optionally waiting server-side), poll with back-off, retry, purge, task history with a cursor iterator, usage and balance.
+- **Exact USD amounts.** Every price, hold, charge and balance is a decimal string with up to nine decimal places, never a float.
 - **Files and the asset library.** Streamed three-step uploads, LoRA import from Hugging Face or Civitai, `popnow://f/` and `popnow://a/` URIs, saved assets and characters.
 - **Webhook verification** for task callbacks and for Standard Webhooks account endpoints.
 - **Contract-tested** against a pinned copy of the [published OpenAPI spec](https://popnow.ai/docs/openapi.yaml).
@@ -38,7 +39,7 @@ PopNow is a browser-based AI studio for videos, images and music: image-to-video
 go get github.com/popnow-ai/popnow-go
 ```
 
-**2. Create an API key** in the [API console](https://popnow.ai/api/console/keys) and export it:
+**2. Create an API key** in the [API console](https://popnow.ai/api/console/keys), add funds in [API billing](https://popnow.ai/api/console/billing) (the API balance starts at $0 and is separate from website credits), and export the key:
 
 ```bash
 export POPNOW_API_KEY="sk-popnow-..."
@@ -78,7 +79,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println(final.State, final.Credits, "credits")
+	log.Println(final.State, "charged $"+final.CostUsd)
 	for _, asset := range final.ReadyAssets() {
 		log.Println(asset.URL) // a signed link, valid for about 20 minutes
 	}
@@ -100,7 +101,7 @@ The import path is the module path, so `go get` works straight from GitHub; no r
 | Asset library | `CreateAsset`, `ListAssets`, `EachAsset`, `Assets` (iterator), `GetAsset`, `UpdateAsset`, `DeleteAsset`, `GetAssetUsage`, `ListCharacters`, `GetCharacter` | `/api/v1/assets*` |
 | Webhooks | `VerifyWebhook`, `VerifyEndpointWebhook` | task callbacks and account endpoints |
 
-Models include Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux, Qwen Image, Seedream, Suno and more across text-to-image, image editing, text-to-video, image-to-video, reference-to-video, video extend, upscaling, text-to-speech, music and speech-to-text. The live list, with each model's input schema and credit price, is `ListModels`:
+Models include Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux, Qwen Image, Seedream, Suno and more across text-to-image, image editing, text-to-video, image-to-video, reference-to-video, video extend, upscaling, text-to-speech, music and speech-to-text. The live list, with each model's input schema and USD price, is `ListModels` (or browse [popnow.ai/api/models](https://popnow.ai/api/models)):
 
 ```go
 models, err := client.ListModels(ctx, popnow.ListModelsOptions{Modality: "video", Task: "image-to-video"})
@@ -108,8 +109,8 @@ if err != nil {
 	return err
 }
 for _, m := range models.Items {
-	if m.Enabled && m.Available && m.Credits != nil {
-		log.Printf("%s  %.1f credits %s", m.Model, m.Credits.PerUnit, m.Credits.Unit)
+	if m.Enabled && m.Available && m.Usd != nil {
+		log.Printf("%s  $%s %s", m.Model, m.Usd.PerUnit, m.Usd.Unit)
 	}
 }
 
@@ -123,7 +124,7 @@ log.Println(string(schema.InputSchema))
 
 ## Show the price first
 
-`Quote` runs the same validation as `CreateTask` but creates nothing and holds nothing. Pass its `QuoteID` and `MaxCredits` back to make sure the price you showed is the price that is held; a price that moved is refused with code `40901` instead.
+`Quote` runs the same validation as `CreateTask` but creates nothing and holds nothing. Submit `request.WithQuote(quote)`, which sends its `QuoteID` and `MaxChargeUsd` as `expectedCostUsd`, to make sure the price you showed is the price that is held; a price that moved, or a quote older than five minutes, is refused with code `40901` instead.
 
 ```go
 request := popnow.CreateTaskInput{
@@ -140,10 +141,10 @@ quote, err := client.Quote(ctx, request)
 if err != nil {
 	return err
 }
-log.Printf("at most %d credits ($%s)", quote.MaxCredits, quote.MaxCharge)
+log.Printf("about $%s, at most $%s", quote.ExpectedChargeUsd, quote.MaxChargeUsd)
 
-request.QuoteID = quote.QuoteID
-request.ExpectedCredits = &quote.MaxCredits
+// After the user agrees to the maximum: confirm exactly that amount.
+request = request.WithQuote(quote)
 
 key, err := popnow.NewIdempotencyKey() // store it with your job before sending
 if err != nil {
@@ -153,10 +154,10 @@ task, err := client.CreateTask(ctx, request, key, popnow.CreateTaskOptions{})
 if err != nil {
 	return err
 }
-log.Println("accepted", task.TaskID, "holding", task.EstimatedCredits, "credits")
+log.Println("accepted", task.TaskID, "holding $"+task.EstimatedCostUsd)
 ```
 
-1 credit = $0.001. The hold is the ceiling: unused credits are released when the task settles, and failed or expired tasks release the hold in full.
+Amounts are exact USD decimal strings with up to nine decimal places; keep them as strings rather than parsing them into floats. The hold is the ceiling: when the task succeeds you pay what it actually used and the rest is released, and failed or expired tasks release the hold in full. `Task.CostUsd` is the hold while `Settled` is false and the final charge once it is true. The integer credit fields (`MaxCredits`, `EstimatedCredits`, `Credits`, ...) still decode but are deprecated.
 
 ## Skip the first poll
 
@@ -231,7 +232,7 @@ for asset, err := range client.Assets(ctx, popnow.ListAssetsOptions{Kind: "video
 }
 ```
 
-Storage unlocks with your lifetime credit purchases; `GetAssetUsage` shows the plan and limits. Without a top-up, saving fails with `APIError.Reason == "asset_library_locked"`.
+Storage unlocks with the account owner's lifetime top-ups; `GetAssetUsage` shows the plan, the limits and how much more to top up for the next plan. Before the first top-up, saving fails with `APIError.Reason == "asset_library_locked"`.
 
 ## Webhooks instead of polling
 
@@ -276,27 +277,27 @@ Account endpoints registered in the console use the [Standard Webhooks](https://
 
 ## Balance, usage and history
 
-All three are scoped to **this API key**: other keys on the account, and generations started on the website, are not included.
+`GetBalance` reads the USD API balance behind the key. Only API funds count there: website credits are a separate wallet and cannot be moved into it. Usage and history are scoped to **this API key**: other keys on the account, and generations started on the website, are not included.
 
 ```go
 balance, err := client.GetBalance(ctx)
 if err != nil {
 	return err
 }
-log.Printf("%d credits available, %d held", balance.AvailableCredits, balance.HeldCredits)
+log.Printf("$%s available, $%s held", balance.AvailableUsd, balance.HeldUsd)
 
 usage, err := client.GetUsage(ctx, popnow.UsageOptions{From: "2026-10-01", To: "2026-10-08"})
 if err != nil {
 	return err
 }
-log.Printf("%d calls, %d credits over [%s,%s)", usage.TotalCalls, usage.TotalCredits, usage.From, usage.To)
+log.Printf("%d calls, $%s settled over [%s,%s)", usage.TotalCalls, usage.TotalSpend, usage.From, usage.To)
 
 // Every filter is repeated on every page; only the cursor moves.
 for item, err := range client.Tasks(ctx, popnow.ListTasksOptions{From: "2026-10-01", To: "2026-10-08"}) {
 	if err != nil {
 		return err
 	}
-	log.Println(item.TaskID, item.State, item.Credits)
+	log.Println(item.TaskID, item.State, "$"+item.Cost)
 }
 ```
 
@@ -310,8 +311,8 @@ Every rejected call is a `*popnow.APIError`:
 var apiErr *popnow.APIError
 if errors.As(err, &apiErr) {
 	log.Println(apiErr.Status, apiErr.Code, apiErr.Reason, apiErr.RequestID, apiErr.RetryAfter)
-	if apiErr.Code == popnow.CodeInsufficientCredits {
-		log.Println("buy credits at https://popnow.ai/pricing")
+	if apiErr.Code == popnow.CodeInsufficientBalance {
+		log.Println("add funds at https://popnow.ai/api/console/billing")
 	}
 }
 ```
@@ -324,7 +325,7 @@ Branch on `Code`, never on the message: messages can be translated (`Options.Acc
 | `40003` | 400 | uploaded bytes do not match their ticket | upload again with a new ticket |
 | `40004` | 400 | valid, but this combination of settings cannot be served now | change the named setting |
 | `401` | 401 | missing, unknown or revoked key | check `POPNOW_API_KEY` |
-| `40201` | 402 | not enough credits for the hold | buy credits, resend |
+| `40201` | 402 | the available API balance cannot cover the USD hold | add funds in [API billing](https://popnow.ai/api/console/billing), resend |
 | `40202` | 402 | a key spend cap was reached | raise the cap in the console |
 | `40301` / `40302` / `40303` | 403 | key not allowed this model / IP not allowed / region not offered | adjust the key |
 | `40310` | 403 | account email not verified | open the verification link |
@@ -361,7 +362,7 @@ Upload the image with `client.UploadFile` (or use a public HTTPS URL), then call
 
 ### How much does a PopNow API call cost?
 
-Each model has a credit price (1 credit = $0.001), shown by `ListModels` in `Model.Credits` and on [popnow.ai/pricing](https://popnow.ai/pricing). `client.Quote` returns the exact `MaxCredits` for one request without spending anything. API calls and the website share one wallet and one price list. Failed tasks are refunded.
+Each model has a USD price per image, per second, per request and so on, shown by `ListModels` in `Model.Usd` and on [popnow.ai/api/pricing](https://popnow.ai/api/pricing). `client.Quote` returns the exact `MaxChargeUsd` for one request without spending anything. A model costs the same on the API as on popnow.ai, but API calls are paid from a separate USD [API balance](https://popnow.ai/docs/billing), not from website credits. Failed and expired tasks release their hold, so they cost nothing.
 
 ### Which AI models can I call from Go?
 
@@ -379,9 +380,9 @@ Either. Set `CallBackURL` on `CreateTask` and verify each delivery with `popnow.
 
 Signed output links last about 20 minutes; read the task again or call `CreateDownloadURL` for a fresh one. Outputs themselves follow the retention policy shown in `Task.Retention` (you can shorten it per task with `CreateTaskOptions.RetentionSeconds`). To keep a result indefinitely, save it with `CreateAsset`.
 
-### Is there an MCP server for ChatGPT or Claude?
+### Is there an MCP server for Claude Code, Cursor or Codex?
 
-Yes: a remote MCP server at `https://api.popnow.ai/mcp` exposes image, video, music and speech tools. See [popnow.ai/mcp](https://popnow.ai/mcp) and [popnow-mcp](https://github.com/popnow-ai/popnow-mcp).
+Yes: the PopNow developer MCP server at `https://api.popnow.ai/api/v1/mcp` gives coding agents image, video, music and speech tools and `create_task` for any model, authenticated with the same `sk-popnow-...` API key and paid in USD from the same API balance. See [popnow.ai/api/mcp](https://popnow.ai/api/mcp) and [popnow-api-mcp](https://github.com/popnow-ai/popnow-api-mcp) (with the `@popnow/mcp` stdio bridge). Agent skills are listed at [popnow.ai/api/skills](https://popnow.ai/api/skills).
 
 ## Development
 
@@ -398,10 +399,13 @@ The tests use local fake servers and need no API key. `TestContractHasNotDrifted
 - Website: [popnow.ai](https://popnow.ai)
 - Docs: [popnow.ai/docs](https://popnow.ai/docs)
 - API reference (OpenAPI): [popnow.ai/docs/openapi.yaml](https://popnow.ai/docs/openapi.yaml)
-- Pricing: [popnow.ai/pricing](https://popnow.ai/pricing)
-- MCP server: [popnow.ai/mcp](https://popnow.ai/mcp)
+- API pricing: [popnow.ai/api/pricing](https://popnow.ai/api/pricing)
+- Models: [popnow.ai/api/models](https://popnow.ai/api/models)
+- API billing (add funds): [popnow.ai/api/console/billing](https://popnow.ai/api/console/billing)
+- Developer MCP server: [popnow.ai/api/mcp](https://popnow.ai/api/mcp)
+- Agent skills: [popnow.ai/api/skills](https://popnow.ai/api/skills)
 - llms.txt: [popnow.ai/llms.txt](https://popnow.ai/llms.txt)
-- Other PopNow repos: [popnow-mcp](https://github.com/popnow-ai/popnow-mcp), [popnow-skills](https://github.com/popnow-ai/popnow-skills), [popnow-python](https://github.com/popnow-ai/popnow-python), [popnow-js](https://github.com/popnow-ai/popnow-js), [popnow-api](https://github.com/popnow-ai/popnow-api), [popnow-blender](https://github.com/popnow-ai/popnow-blender), [popnow-comfyui](https://github.com/popnow-ai/popnow-comfyui), [n8n-nodes-popnow](https://github.com/popnow-ai/n8n-nodes-popnow), [popnow-cli](https://github.com/popnow-ai/popnow-cli), [popnow-php](https://github.com/popnow-ai/popnow-php)
+- Other PopNow repos: [popnow-api-mcp](https://github.com/popnow-ai/popnow-api-mcp), [popnow-skills](https://github.com/popnow-ai/popnow-skills), [popnow-python](https://github.com/popnow-ai/popnow-python), [popnow-js](https://github.com/popnow-ai/popnow-js), [popnow-api](https://github.com/popnow-ai/popnow-api), [popnow-blender](https://github.com/popnow-ai/popnow-blender), [popnow-comfyui](https://github.com/popnow-ai/popnow-comfyui), [n8n-nodes-popnow](https://github.com/popnow-ai/n8n-nodes-popnow), [popnow-cli](https://github.com/popnow-ai/popnow-cli), [popnow-php](https://github.com/popnow-ai/popnow-php)
 
 ## Contributing
 

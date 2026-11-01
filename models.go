@@ -8,8 +8,62 @@ import (
 	"time"
 )
 
-// ModelCredits is a model's price in credits (1 credit = $0.001), the same
-// price popnow.ai shows. Use Quote for the exact amount of one request.
+// ModelUsd is a model's API price in USD. Every amount is an exact decimal
+// string; units, tier conditions and token thresholds keep their meaning. It
+// is a rate snapshot: Quote gives the authoritative amount of one request.
+type ModelUsd struct {
+	// Unit is how the price scales: per_image, per_second, per_request, ...
+	// Treat it as open.
+	Unit string `json:"unit"`
+	// PerUnit is the starting USD price per unit.
+	PerUnit string `json:"perUnit,omitempty"`
+	// Blocks, when set, rounds a duration up to whole billing blocks.
+	Blocks *ModelPriceBlocks `json:"blocks,omitempty"`
+	// Input, Output, CachedInput and CacheWrite are chat-model prices in USD
+	// per million tokens (reasoning tokens count as output).
+	Input       string `json:"input,omitempty"`
+	Output      string `json:"output,omitempty"`
+	CachedInput string `json:"cachedInput,omitempty"`
+	CacheWrite  string `json:"cacheWrite,omitempty"`
+	// LongContext prices chat requests whose input passes a token threshold.
+	LongContext *ModelUsdLongContext `json:"longContext,omitempty"`
+	// Rules lists the price tiers.
+	Rules []ModelUsdRule `json:"rules,omitempty"`
+	// Currency is USD.
+	Currency string `json:"currency"`
+}
+
+// ModelPriceBlocks rounds a duration up to whole blocks of Seconds, subject to
+// a minimum and a cap counted in blocks. Zero Min or Cap means none is stated.
+type ModelPriceBlocks struct {
+	Seconds int `json:"seconds"`
+	Min     int `json:"min,omitempty"`
+	Cap     int `json:"cap,omitempty"`
+}
+
+// ModelUsdLongContext holds the chat prices, in USD per million tokens, for a
+// request whose input exceeds ThresholdTokens (or reaches it when Inclusive).
+type ModelUsdLongContext struct {
+	ThresholdTokens int    `json:"thresholdTokens,omitempty"`
+	Inclusive       bool   `json:"inclusive,omitempty"`
+	Input           string `json:"input,omitempty"`
+	CachedInput     string `json:"cachedInput,omitempty"`
+	CacheWrite      string `json:"cacheWrite,omitempty"`
+	Output          string `json:"output,omitempty"`
+}
+
+// ModelUsdRule is one price tier: it applies when the request matches its
+// When values, where "*" matches the field that sets the tier.
+type ModelUsdRule struct {
+	When    map[string]any `json:"when"`
+	PerUnit string         `json:"perUnit"`
+	Unit    string         `json:"unit,omitempty"`
+}
+
+// ModelCredits is a model's price on the old credit scale (1 credit =
+// $0.001). It can lose precision.
+//
+// Deprecated: read Model.Usd, and Quote for the exact amount of one request.
 type ModelCredits struct {
 	// Unit is how the price scales: per_image, per_second, per_request, ...
 	// Treat it as open.
@@ -20,8 +74,9 @@ type ModelCredits struct {
 	Rules []ModelCreditRule `json:"rules,omitempty"`
 }
 
-// ModelCreditRule is one price tier: it applies when the request matches its
-// When values, where "*" matches the field that sets the tier.
+// ModelCreditRule is one price tier on the old credit scale.
+//
+// Deprecated: use ModelUsdRule.
 type ModelCreditRule struct {
 	When    map[string]any `json:"when"`
 	PerUnit float64        `json:"perUnit"`
@@ -66,8 +121,13 @@ type Model struct {
 	Enabled   bool `json:"enabled"`
 	Available bool `json:"available"`
 	// QuantityField names the input field that multiplies the price.
-	QuantityField string        `json:"quantityField"`
-	Credits       *ModelCredits `json:"credits,omitempty"`
+	QuantityField string `json:"quantityField"`
+	// Usd is the model's API price in USD.
+	Usd *ModelUsd `json:"usd,omitempty"`
+	// Credits is the same price on the old credit scale.
+	//
+	// Deprecated: use Usd.
+	Credits *ModelCredits `json:"credits,omitempty"`
 	// InputSchema is JSON Schema 2020-12 and stays raw on purpose: it is what
 	// validates your input and what a form generator renders. Request it with
 	// ListModelsOptions.IncludeSchema or read it from GetModel.
@@ -107,7 +167,7 @@ type ListModelsOptions struct {
 }
 
 // ListModels returns every image, video and audio model this API key may
-// call, with its price in credits. The list is not paginated.
+// call, with its USD price in Model.Usd. The list is not paginated.
 func (c *Client) ListModels(ctx context.Context, opts ListModelsOptions) (*ModelList, error) {
 	query := url.Values{}
 	setIfNotEmpty(query, "modality", opts.Modality)

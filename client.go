@@ -27,7 +27,7 @@ type HTTPDoer interface {
 // Options configures New. Every zero value falls back to a documented default.
 type Options struct {
 	// APIKey defaults to the POPNOW_API_KEY environment variable. Keep it
-	// server-side; it is a bearer credential for your credit wallet.
+	// server-side; it is a bearer credential for your API balance.
 	APIKey string
 	// BaseURL defaults to APIBaseURL.
 	BaseURL string

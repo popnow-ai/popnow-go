@@ -5,4 +5,4 @@ contact_links:
     about: Endpoints, models, errors and limits.
   - name: Account, billing or task questions
     url: https://popnow.ai/contact
-    about: Questions about your account, credits or a specific task go to PopNow support.
+    about: Questions about your account, API balance or a specific task go to PopNow support.

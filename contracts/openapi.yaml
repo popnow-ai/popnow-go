@@ -4,19 +4,21 @@ info:
   version: 1.0.0
   description: |
     Contract for the PopNow developer API (`https://api.popnow.ai/api/v1`).
-    
-    Generate images, video and audio with the same models, prices and credit wallet as popnow.ai. Every
+
+    Generate images, video and audio using an independent API USD wallet, and call chat
+    models through the standard OpenAI, Anthropic and Gemini chat protocols. Every
     operation requires a Bearer API key created in the developer console (https://popnow.ai/api/console).
     Every JSON response uses the `{code,msg,data,request_id}` envelope. A successful HTTP response has
     `code: 200`; asynchronous task success or failure is expressed by `data.state`, not by the envelope code.
-    
-    Billing: 1 credit = $0.001. API calls and generations on the website use the same wallet and the same price.
-    Amounts are returned both as integer credits (`maxCredits`, `estimatedCredits`, `credits`…) and as the
-    equivalent USD decimal string (`maxCharge`, `estimatedCost`, `cost`…).
-    
+
+    Billing: all API media and chat calls use exact USD from the API balance behind the key, with nanodollar precision.
+    Recommended fields include `maxChargeUsd`, `expectedCostUsd`, `estimatedCostUsd`, `costUsd`.
+    Existing USD fields remain aliases. Credit fields remain deprecated display projections, not billing units.
+
+
     The `/v1` operations tagged `OpenAI Compatible` are the one documented exception to the envelope: they
     return OpenAI response and error objects so the official SDKs work by changing only `base_url`.
-    
+
     Error text language: `msg`, task `errorMessage` and the compatible layer's `error.message` are English by
     default. Send `Accept-Language` (`en`, `zh-CN`, `zh-TW`, `ja`, `ko`, `de`, `fr`, `es`, `pt-BR`, `ru`, `it`, `pl`;
     regional variants such as `de-DE` match their language) to choose another language for one request, or set the
@@ -34,8 +36,12 @@ tags:
   - name: Media
   - name: Assets
     description: Long-term private asset library. Saved files are kept until you delete them and are referenced as popnow://a/<id> in generation requests made with keys of the same workspace. A personal key reaches your personal library; a team workspace key reaches that team's shared library. Only short private previews are ever returned; there are no public links. Storage unlocks with the account owner's lifetime credit purchases.
+  - name: Recipes
+    description: Your saved recipes and workflows from popnow.ai (and the ones your team shares with you), runnable with one call; and your Poppie skills, readable as instructions. Runs require explicit USD approval and use the independent API wallet. Each step enforces the API key model and spend limits.
+  - name: Agent Skills
+    description: "Installable skill presets for AI coding agents (Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Windsurf and more than 20 others): list and search the catalog, read one skill's install folders and commands, and download the package with your key. Installing is free; steps that generate images, video, music or voice through PopNow are billed like any other task and quoted first."
   - name: OpenAI Compatible
-    description: "OpenAI Videos protocol shell under `/v1` (create, retrieve and download a video) and the OpenAI model list. It shares API keys, limits, validation and billing with `/api/v1` but uses the OpenAI request, response and error shapes. Send the key as `Authorization: Bearer <key>`. Keys in the URL query string are never accepted."
+    description: "Chat models through the standard protocols (OpenAI Chat Completions and Responses, Anthropic Messages, Gemini generateContent), the OpenAI Videos protocol shell under `/v1` (create, retrieve and download a video) and the OpenAI model list. It shares API keys, rate limits, spend limits, validation and the API USD wallet with `/api/v1` but uses each protocol's own request, response and error shapes, so the official SDKs work by changing only the base URL. Chat requests are forwarded to the model as sent; each model's own usage policy applies. Send the key as `Authorization: Bearer <key>` (Anthropic SDKs may send `x-api-key`). Keys in the URL query string are never accepted."
 security:
   - bearerAuth: []
 paths:
@@ -47,9 +53,9 @@ paths:
       summary: Quote a task before reserving funds
       description: |
         Validates the same model input and admission rules as task creation,
-        without creating a task, reserving credits or starting generation.
+        without creating a task, reserving funds or starting generation.
         The signed quote is bound to this account, API key and request and is
-        valid for five minutes. Pass `quoteId` and `expectedCredits` (or `expectedCost`) with the same request to
+        valid for five minutes. Pass `quoteId` and optionally `expectedCostUsd` (legacy alias `expectedCost`) with the same request to
         createTask to make sure the price you showed is the price that is held. New acceptance rejects an expired
         or changed quote with business code 40901. A replay of an already
         accepted Idempotency-Key still returns the original task.
@@ -96,7 +102,7 @@ paths:
         Validates the model input, reserves the estimated charge, chooses an
         available deployment, and creates a task in `queued` state. HTTP 202
         means the task was accepted; it does not mean generation has completed.
-        
+
         An `Idempotency-Key` is optional but strongly recommended. For the same
         account **and the same API key**, repeating a key with the same normalized
         model, input, and callback URL within 24 hours returns the
@@ -108,6 +114,7 @@ paths:
       parameters:
         - $ref: "#/components/parameters/IdempotencyKey"
         - $ref: "#/components/parameters/PopNowRetention"
+        - $ref: "#/components/parameters/RequestTags"
         - name: wait
           in: query
           required: false
@@ -118,13 +125,13 @@ paths:
             positive integer is ignored rather than rejected, because a typo in an
             optimisation parameter should not fail a generation that would
             otherwise succeed.
-            
+
             Reaching a terminal state within the budget returns `200` with the
             same task record `recordInfo` returns. Running out of budget returns
             the ordinary `202` — identical to omitting `wait` — and you poll from
             there. Disconnecting stops the wait and nothing else: the task keeps
             running and is billed as usual.
-            
+
             The ceiling stays well under the 100-second edge timeout on purpose.
             Past that line the connection is cut by the CDN rather than by us, and
             the caller gets a `524` carrying neither the task ID nor any resumable
@@ -200,7 +207,7 @@ paths:
               description: |
                 Sent only when `callBackUrl` was supplied. The body is the same envelope and task
                 record returned by `recordInfo` (payload version 2).
-                
+
                 Verify `X-Webhook-Signature` over `taskId.timestamp.sha256(raw_body)` with HMAC-SHA256 and the
                 account webhook key (developer console), taking `taskId` from `data.taskId`, then
                 compare the Base64-encoded result in constant time.
@@ -339,24 +346,24 @@ paths:
       description: |
         Removes the task's generated media objects, its result payload, and the
         stored request text including the prompt.
-        
+
         **Billing evidence is never touched.** The ledger, the charged amount,
         the model identifier, the state, the timestamps and the request_id all
         remain, so the task stays fully auditable in billing. What is destroyed
         is the content, not the spend record; the response repeats this as
         `billingRetained`.
-        
+
         Only a finished task can be destroyed; a task that is still queued or
         running returns 400. Its outputs have not landed yet, and removing half
         of them is worse than removing none. An accepted generation task cannot
         be stopped, so the only thing to do is wait for it to reach a terminal
         state and call this endpoint then.
-        
+
         The call is idempotent by `taskId`: destroying an already destroyed task
         returns 200 with the original `purgedAt`, so a client may safely retry
         after a timeout. This endpoint does not read an `Idempotency-Key` header;
         the `taskId` itself is the idempotency key.
-        
+
         Media objects are removed by a background sweep within about a minute,
         so `mediaDeletionPending` can be true while `contentState` is already
         `purged`. Deleting them inline would let one undeletable object block the
@@ -398,9 +405,10 @@ paths:
       operationId: listModels
       summary: List callable models and their credit prices
       description: |
-        Returns every image, video and audio model your key can call, without pagination, with
-        its price in credits (`credits`, the same price popnow.ai shows). Text models are not part of the API.
-        The server sends `Cache-Control: private, max-age=60`.
+        Returns every chat, image, video and audio model your key can call, without pagination, with
+        its exact USD rates (`usd`); `credits` is a deprecated display projection. Chat models
+        (`modality: text`, called through the chat operations) carry input and output prices per 1M tokens.
+        Pass `modality=text` to list only chat models. The server sends `Cache-Control: private, max-age=60`.
       parameters:
         - name: modality
           in: query
@@ -410,6 +418,7 @@ paths:
               - image
               - video
               - audio
+              - text
         - name: provider
           in: query
           schema:
@@ -852,7 +861,7 @@ paths:
         images of one character) and a case-insensitive name search in `q`.
         Order with `sort`: `recent` (default, newest first), `oldest`, `name`
         (case-insensitive A to Z) or `size` (largest first).
-        
+
         Every item carries a stable `uri` (`popnow://a/<id>`) and a private
         `previewUrl` signed for at most 20 minutes. The `uri` works only in
         generation requests made with keys of the same workspace (any media field
@@ -860,7 +869,7 @@ paths:
         reachable link, so the asset library cannot be used as file hosting.
         Responses are `private, no-store`. Listing and reading assets is limited
         to 60 requests per minute per account.
-        
+
         The key decides the library: a key created in your personal workspace
         reaches your personal library, and a key created in a team workspace
         (by any member) reaches that team's shared library. A team key never
@@ -971,7 +980,7 @@ paths:
         team's shared library for a team key), where it is kept until it is
         deleted, the owner closes the account or the team is deleted. Choose one
         source:
-        
+
         - `source: task_output` with `taskId` and either the output `key` or its
           zero-based `index` (the order of `output.assets` in `recordInfo`). The
           task must be one of your own successful tasks; with a team key, a task
@@ -984,11 +993,11 @@ paths:
           MP4 and WebM video, and MP3, WAV, FLAC and Ogg audio are accepted.
           Links to PopNow storage are refused; save those with `task_output` or
           `upload` instead.
-        
+
         `Idempotency-Key` is required and bound to the request for 24 hours.
         Saving the same source again returns the existing asset without using
         more space. Dimensions and durations are measured by the server.
-        
+
         Storage unlocks with the owner's lifetime top-ups (see
         `GET /api/v1/assets/usage`); the owner's personal library and all of
         their team libraries share one allowance. Without any top-up, saving
@@ -1054,7 +1063,7 @@ paths:
         every team library they own. A plan with all limits at 0 cannot save new
         assets; assets already saved stay usable. Byte values use binary units
         (500 MB = 524288000 bytes).
-        
+
         `scope` tells which library the key reaches and what it may do there.
         When `scope.canTopUp` is false (a team key whose creator is not the
         team owner, billing members included), `lifetimeTopupUsd` and
@@ -1192,13 +1201,13 @@ paths:
         copying them: deleting a character never deletes its images, and deleting
         an image removes it from every character. Characters are created and
         edited in the console; this API only reads them.
-        
+
         The key decides the library exactly as for `GET /api/v1/assets`. Each
         image is an asset with its stable `uri` (`popnow://a/<id>`), usable in
         generation requests made with keys of the same workspace, and a private
         `previewUrl` signed for at most 20 minutes. `cover` is the cover image
         (null while the character has no images).
-        
+
         Newest first, one page at a time: pass the previous page's `nextCursor`
         as `cursor`. Pass `assetId` to list only the characters that contain that
         asset. Responses are `private, no-store`; reading characters shares the
@@ -1295,12 +1304,13 @@ paths:
       operationId: listOpenAIModels
       summary: List callable models in the OpenAI `model` list shape
       description: |
-        Returns every model that can be called right now. `id` is the model call name
-        accepted by every `/v1` and `/api/v1` operation; `owned_by` is the model publisher.
-        Prices are not included; use `/api/v1/models`.
-        
-        Besides the four OpenAI fields, every item carries `modality` and `task`. OpenAI SDKs ignore the extra fields.
-        Only video models work on `POST /v1/videos`.
+        Returns every model that can be called right now, chat models first. `id` is the model
+        call name accepted by every `/v1` and `/api/v1` operation; `owned_by` is the model publisher.
+
+        Besides the four OpenAI fields, every item carries `modality`, `task` and its exact rates in `usd` (the same
+        object as on `/api/v1/models`). Chat models (`task: chat`, the only ones the chat operations accept) also carry
+        `context_length`, `max_output_tokens` and `supported_parameters`. OpenAI SDKs ignore the extra fields.
+        Pass `modality=text` to list only chat models. Only video models work on `POST /v1/videos`.
       parameters:
         - name: modality
           in: query
@@ -1309,6 +1319,7 @@ paths:
           schema:
             type: string
             enum:
+              - text
               - image
               - video
               - audio
@@ -1329,6 +1340,420 @@ paths:
           $ref: "#/components/responses/OpenAIError"
         "503":
           $ref: "#/components/responses/OpenAIError"
+  /v1/chat/completions:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: createChatCompletion
+      summary: OpenAI Chat Completions on a PopNow text model
+      description: |
+        Accepts an OpenAI Chat Completions request. `messages`, `tools`,
+        `tool_choice`, `parallel_tool_calls`, `response_format`, `max_tokens`
+        (or `max_completion_tokens`), `temperature`, `top_p`, `top_k`, `seed`
+        and `stop` map onto the model's public input fields of the same name
+        when the model declares them (each model page lists its own set);
+        `stream`,
+        `stream_options`, `user`, `metadata` and `store` are handled by this
+        layer. Pure sampling parameters the model does not declare
+        (`temperature`, `top_p`, `top_k`, `min_p`, `top_a`,
+        `frequency_penalty`, `presence_penalty`, `repetition_penalty`), `n: 1`,
+        an empty `stop`, `stop` on a model without stop sequences,
+        `reasoning_effort` on a model without reasoning levels, and a
+        `reasoning` object that cannot be translated are
+        ignored, and the response lists them in the `X-PopNow-Ignored-Params`
+        header. Values the model declares but cannot take as sent are changed
+        to the nearest accepted value and listed as `name=value` in the
+        `X-PopNow-Adjusted-Params` header: a sampling value outside the model's
+        range is clamped to the bound, a `stop` list longer than the model
+        allows keeps its first entries, a `reasoning_effort` level the model
+        does not offer becomes the nearest level it does (the lower one on a
+        tie), and `reasoning.effort` (or `reasoning.enabled: false`, as
+        `none`) becomes `reasoning_effort`. Any other parameter is forwarded to
+        the model's input schema and rejected with `400` when the model does
+        not declare it.
+
+        `stream: true` returns a Server-Sent Events stream of
+        `chat.completion.chunk` objects terminated by `data: [DONE]`. Every
+        chunk has a non-empty `choices` array and each choice ends with exactly
+        one chunk carrying `finish_reason`. Usage follows OpenAI: a stream
+        carries no `usage` unless `stream_options.include_usage` is `true`, in
+        which case one extra chunk with `choices: []` and the final `usage`
+        comes right before `[DONE]` and every other chunk has `usage: null`.
+        `stream: false` returns one `chat.completion` object that always has
+        `usage`. Billing: chat models are priced per token in exact USD, listed per 1M input and output
+        tokens in `usd` on `GET /api/v1/models` and `GET /v1/models`. When the request is accepted, the most it
+        can cost is held from your balance, computed from the input and `max_tokens` (the model's maximum output when
+        you omit it, so set `max_tokens` to keep holds small). When the reply ends you are charged its actual usage in
+        exact USD, with no per-request minimum, and the rest of the hold is released. A balance below the
+        hold, or a key spend limit that would be exceeded, returns `402` before anything is sent to the model. A request
+        that fails or that the model refuses is refunded in full. The `X-PopNow-Task-Id` response header names the task;
+        `GET /api/v1/jobs/recordInfo` shows the final charge in `cost` (USD) and `exactCredits`. Message text is not
+        kept after the charge settles. Requests are forwarded to the model as sent and each model's own usage policy applies.
+
+        A non-streaming call that is still running after about 30 seconds is
+        kept open: the `200` status and the `X-PopNow-Keepalive: 1` header go out
+        first, followed by a newline every 15 seconds and then the JSON body.
+        A failure after that point is the usual `{"error": {...}}` object in the
+        body of that `200` response, so check for an `error` key when the
+        header is present. The same applies to `/v1/responses`, `/v1/messages`
+        (Anthropic error object) and `:generateContent` (Gemini error object,
+        whose `error.code` keeps the HTTP status the error would have had).
+
+        Errors a client can act on: an unknown `model` returns `404` with
+        `code: model_not_found`, the ID shape (`publisher/model/chat`) and the
+        closest callable chat model; a model that is not a chat model returns
+        `400` with `param: model`; a field or message part the model does not
+        accept (for example an `image_url` part on a text-only model) returns
+        `400` with `code: unsupported_parameter` and `param` pointing at it; a
+        content-policy refusal returns `400` with `code: content_rejected`.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatCompletionRequest"
+      responses:
+        "200":
+          description: One `chat.completion` object, or an SSE stream when `stream` is true.
+          headers:
+            X-PopNow-Task-Id:
+              $ref: "#/components/headers/PopNowTaskId"
+            X-PopNow-Keepalive:
+              $ref: "#/components/headers/PopNowKeepalive"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatCompletion"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/OpenAIError"
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "402":
+          $ref: "#/components/responses/OpenAIError"
+        "403":
+          $ref: "#/components/responses/OpenAIError"
+        "404":
+          $ref: "#/components/responses/OpenAIError"
+        "409":
+          $ref: "#/components/responses/OpenAIError"
+        "413":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "500":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
+  /v1/responses:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: createResponse
+      summary: OpenAI Responses API subset on a PopNow text model
+      description: |
+        Accepts the stateless subset of the OpenAI Responses API: `model`,
+        `input` (string or item array with `message`, `function_call` and
+        `function_call_output` items), `instructions`, `max_output_tokens`,
+        `temperature`, `top_p`, `tools` (function tools), `tool_choice`,
+        `text.format`, `reasoning.effort` and `stream`. The request is
+        translated to a chat completion internally. `previous_response_id`
+        is rejected with `400`; send the full history in `input` instead.
+        As on Chat Completions, sampling parameters the model does not
+        declare are ignored and listed in the `X-PopNow-Ignored-Params`
+        response header, and values outside the model's range or levels are
+        changed to the nearest accepted value and listed in
+        `X-PopNow-Adjusted-Params`.
+
+        Non-streaming calls return a `response` object with `output[]`
+        (`message` and `function_call` items) and `usage`. Streaming calls
+        emit `response.created`, `response.output_text.delta` and
+        `response.completed` events.
+
+        Billing: chat models are priced per token in exact USD, listed per 1M input and output
+        tokens in `usd` on `GET /api/v1/models` and `GET /v1/models`. When the request is accepted, the most it
+        can cost is held from your balance, computed from the input and `max_tokens` (the model's maximum output when
+        you omit it, so set `max_tokens` to keep holds small). When the reply ends you are charged its actual usage in
+        exact USD, with no per-request minimum, and the rest of the hold is released. A balance below the
+        hold, or a key spend limit that would be exceeded, returns `402` before anything is sent to the model. A request
+        that fails or that the model refuses is refunded in full. The `X-PopNow-Task-Id` response header names the task;
+        `GET /api/v1/jobs/recordInfo` shows the final charge in `cost` (USD) and `exactCredits`. Message text is not
+        kept after the charge settles. Requests are forwarded to the model as sent and each model's own usage policy applies.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResponsesRequest"
+      responses:
+        "200":
+          description: One `response` object, or an SSE stream when `stream` is true.
+          headers:
+            X-PopNow-Task-Id:
+              $ref: "#/components/headers/PopNowTaskId"
+            X-PopNow-Keepalive:
+              $ref: "#/components/headers/PopNowKeepalive"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResponseObject"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/OpenAIError"
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "402":
+          $ref: "#/components/responses/OpenAIError"
+        "403":
+          $ref: "#/components/responses/OpenAIError"
+        "404":
+          $ref: "#/components/responses/OpenAIError"
+        "409":
+          $ref: "#/components/responses/OpenAIError"
+        "413":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "500":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
+  /v1/messages:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: createMessage
+      summary: Anthropic Messages API on a PopNow text model
+      description: |
+        Accepts an Anthropic Messages request (`model`, `system`, `messages`
+        with text / image / tool_use / tool_result blocks, `max_tokens`,
+        `temperature`, `top_p`, `top_k`, `stop_sequences`, `tools`,
+        `tool_choice`, `stream`) and translates it to a chat completion
+        internally. `stop_sequences` becomes the model's `stop` field, and
+        `tool_choice.disable_parallel_tool_use: true` becomes
+        `parallel_tool_calls: false`; a model that does not declare the
+        target field rejects the request with `400` instead of ignoring it.
+        Non-streaming calls return an Anthropic `message` object. Streaming
+        calls emit `message_start`, `content_block_start`,
+        `content_block_delta`, `content_block_stop`, `message_delta` and
+        `message_stop` events. Errors use the Anthropic
+        `{type:"error",error:{type,message}}` shape.
+
+        Billing: chat models are priced per token in exact USD, listed per 1M input and output
+        tokens in `usd` on `GET /api/v1/models` and `GET /v1/models`. When the request is accepted, the most it
+        can cost is held from your balance, computed from the input and `max_tokens` (the model's maximum output when
+        you omit it, so set `max_tokens` to keep holds small). When the reply ends you are charged its actual usage in
+        exact USD, with no per-request minimum, and the rest of the hold is released. A balance below the
+        hold, or a key spend limit that would be exceeded, returns `402` before anything is sent to the model. A request
+        that fails or that the model refuses is refunded in full. The `X-PopNow-Task-Id` response header names the task;
+        `GET /api/v1/jobs/recordInfo` shows the final charge in `cost` (USD) and `exactCredits`. Message text is not
+        kept after the charge settles. Requests are forwarded to the model as sent and each model's own usage policy applies.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnthropicMessageRequest"
+      responses:
+        "200":
+          description: One Anthropic `message` object, or an SSE stream when `stream` is true.
+          headers:
+            X-PopNow-Task-Id:
+              $ref: "#/components/headers/PopNowTaskId"
+            X-PopNow-Keepalive:
+              $ref: "#/components/headers/PopNowKeepalive"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnthropicMessage"
+            text/event-stream:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/AnthropicError"
+        "401":
+          $ref: "#/components/responses/AnthropicError"
+        "402":
+          $ref: "#/components/responses/AnthropicError"
+        "403":
+          $ref: "#/components/responses/AnthropicError"
+        "404":
+          $ref: "#/components/responses/AnthropicError"
+        "409":
+          $ref: "#/components/responses/AnthropicError"
+        "413":
+          $ref: "#/components/responses/AnthropicError"
+        "429":
+          $ref: "#/components/responses/AnthropicError"
+        "500":
+          $ref: "#/components/responses/AnthropicError"
+        "503":
+          $ref: "#/components/responses/AnthropicError"
+  /v1beta/models/{model}:generateContent:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: geminiGenerateContent
+      summary: Google Gemini generateContent on a PopNow text model
+      description: |
+        Accepts a Google Gemini `generateContent` request (`contents` with
+        text / inlineData / functionCall / functionResponse parts,
+        `systemInstruction`, `tools.functionDeclarations`, `toolConfig`,
+        `generationConfig` such as `temperature`, `topP`, `maxOutputTokens`,
+        `stopSequences`, `responseMimeType`, `responseSchema`,
+        `thinkingConfig`). `{model}` is a PopNow text model identifier from
+        `/v1/models` and may contain a slash (for example
+        `google/gemini-3-flash-preview`). Validation, pricing and availability are
+        identical to `/v1/chat/completions`. The response is one
+        `GenerateContentResponse`. Errors use the Google
+        `{error:{code,message,status}}` shape. A call still running after about
+        30 seconds is kept open with leading whitespace and the
+        `X-PopNow-Keepalive: 1` header, as described on
+        `/v1/chat/completions`; a failure after that point is the same error
+        object inside a `200` response.
+
+        Billing: chat models are priced per token in exact USD, listed per 1M input and output
+        tokens in `usd` on `GET /api/v1/models` and `GET /v1/models`. When the request is accepted, the most it
+        can cost is held from your balance, computed from the input and `max_tokens` (the model's maximum output when
+        you omit it, so set `max_tokens` to keep holds small). When the reply ends you are charged its actual usage in
+        exact USD, with no per-request minimum, and the rest of the hold is released. A balance below the
+        hold, or a key spend limit that would be exceeded, returns `402` before anything is sent to the model. A request
+        that fails or that the model refuses is refunded in full. The `X-PopNow-Task-Id` response header names the task;
+        `GET /api/v1/jobs/recordInfo` shows the final charge in `cost` (USD) and `exactCredits`. Message text is not
+        kept after the charge settles. Requests are forwarded to the model as sent and each model's own usage policy applies.
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiGenerateContentRequest"
+      responses:
+        "200":
+          description: One `GenerateContentResponse`.
+          headers:
+            X-PopNow-Task-Id:
+              $ref: "#/components/headers/PopNowTaskId"
+            X-PopNow-Keepalive:
+              $ref: "#/components/headers/PopNowKeepalive"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeminiGenerateContentResponse"
+        "400":
+          $ref: "#/components/responses/GeminiError"
+        "401":
+          $ref: "#/components/responses/GeminiError"
+        "402":
+          $ref: "#/components/responses/GeminiError"
+        "403":
+          $ref: "#/components/responses/GeminiError"
+        "404":
+          $ref: "#/components/responses/GeminiError"
+        "409":
+          $ref: "#/components/responses/GeminiError"
+        "413":
+          $ref: "#/components/responses/GeminiError"
+        "429":
+          $ref: "#/components/responses/GeminiError"
+        "500":
+          $ref: "#/components/responses/GeminiError"
+        "503":
+          $ref: "#/components/responses/GeminiError"
+  /v1beta/models/{model}:streamGenerateContent:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: geminiStreamGenerateContent
+      summary: Google Gemini streamGenerateContent on a PopNow text model
+      description: |
+        Same request as `generateContent`. With `?alt=sse` (what the Google
+        GenAI SDKs send) the response is a server-sent event stream where each
+        `data:` line is one `GenerateContentResponse`; the final one carries
+        `finishReason` and `usageMetadata`. There is no `[DONE]` sentinel.
+        Without `alt=sse` the response is a JSON array of
+        `GenerateContentResponse` objects written progressively.
+
+        Billing: chat models are priced per token in exact USD, listed per 1M input and output
+        tokens in `usd` on `GET /api/v1/models` and `GET /v1/models`. When the request is accepted, the most it
+        can cost is held from your balance, computed from the input and `max_tokens` (the model's maximum output when
+        you omit it, so set `max_tokens` to keep holds small). When the reply ends you are charged its actual usage in
+        exact USD, with no per-request minimum, and the rest of the hold is released. A balance below the
+        hold, or a key spend limit that would be exceeded, returns `402` before anything is sent to the model. A request
+        that fails or that the model refuses is refunded in full. The `X-PopNow-Task-Id` response header names the task;
+        `GET /api/v1/jobs/recordInfo` shows the final charge in `cost` (USD) and `exactCredits`. Message text is not
+        kept after the charge settles. Requests are forwarded to the model as sent and each model's own usage policy applies.
+      parameters:
+        - name: model
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: alt
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - sse
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiGenerateContentRequest"
+      responses:
+        "200":
+          description: An SSE stream (`alt=sse`) or a JSON array of `GenerateContentResponse`.
+          headers:
+            X-PopNow-Task-Id:
+              $ref: "#/components/headers/PopNowTaskId"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GeminiGenerateContentResponse"
+        "400":
+          $ref: "#/components/responses/GeminiError"
+        "401":
+          $ref: "#/components/responses/GeminiError"
+        "402":
+          $ref: "#/components/responses/GeminiError"
+        "403":
+          $ref: "#/components/responses/GeminiError"
+        "404":
+          $ref: "#/components/responses/GeminiError"
+        "409":
+          $ref: "#/components/responses/GeminiError"
+        "413":
+          $ref: "#/components/responses/GeminiError"
+        "429":
+          $ref: "#/components/responses/GeminiError"
+        "500":
+          $ref: "#/components/responses/GeminiError"
+        "503":
+          $ref: "#/components/responses/GeminiError"
   /v1/videos:
     post:
       tags:
@@ -1460,6 +1885,560 @@ paths:
           $ref: "#/components/responses/OpenAIError"
         "503":
           $ref: "#/components/responses/OpenAIError"
+  /api/v1/recipes:
+    get:
+      tags:
+        - Recipes
+      operationId: listRecipes
+      summary: List your saved recipes and workflows
+      description: |
+        Your own recipes and workflows first, then the ones shared with a team you belong to (`mine: false`, with `teamId`).
+        Each item lists the inputs a run takes, in order. Prompts are never listed; the server assembles them at run time.
+        Items carry `currency: USD`; read one item for `estimated_usd` when a price is available. Obtain an executable quote from POST /run.
+      parameters:
+        - name: kind
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - recipe
+              - workflow
+      responses:
+        "200":
+          description: Your recipes and workflows.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    type: object
+                    required:
+                      - items
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/SavedRecipe"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/recipes/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Recipes
+      operationId: getRecipe
+      summary: Get one recipe or workflow with its current price
+      description: |
+        `currency` is USD. Optional `estimated_usd` is a decimal string for the current price with saved material; omitted when unavailable. Obtain `quote_id` from POST /run before confirming execution.
+        `prompt` is returned only for your own recipes. A recipe you can't reach returns 404.
+      responses:
+        "200":
+          description: The recipe or workflow.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/SavedRecipe"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/recipes/{id}/run:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Recipes
+      operationId: runRecipe
+      summary: Run a saved recipe or workflow
+      description: |
+        Compiles the recipe on the server with your inputs and starts a run (one task per piece; a workflow runs its steps in order,
+        each step using the earlier steps' results). Inputs you leave out use the material saved with the recipe.
+        Media inputs take `popnow://g/<job>/<n>` (a result), `popnow://f/<file>` (an upload), `popnow://a/<asset>` (an API asset) or an
+        https URL, or a list of them; the `prompt` input of a recipe (and text inputs of a workflow) take plain text.
+        First send inputs/count without approval fields to obtain a quote; this does not create a run or hold funds.
+        Confirm the same inputs/count with `currency: USD`, `max_usd` and `quote_id`, plus Idempotency-Key.
+        Missing approval, a changed quote or a price above max_usd returns 200 with `needs_confirmation: true` and a fresh quote,
+        without starting a run. Never automatically approve the new quote. Replaying an accepted Idempotency-Key returns the same run.
+        The total budget is at most $10,000, with a $1,000 per-step limit. Old maxCredits/max_credits are rejected, including zero.
+        Keys with model or spend limits are supported and checked on each step. Unpriced dependent steps cannot execute;
+        after their required outputs become available, the run pauses for a new explicit approval via resume.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Required when confirming execution; omitted for quote-only requests.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 100
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                inputs:
+                  type: object
+                  description: Input id → a reference, a list of references, or text.
+                  additionalProperties:
+                    oneOf:
+                      - type: string
+                      - type: array
+                        maxItems: 10
+                        items:
+                          type: string
+                count:
+                  type: integer
+                  minimum: 1
+                  maximum: 4
+                  description: How many pieces a recipe makes (workflows always run once).
+                currency:
+                  type: string
+                  const: USD
+                max_usd:
+                  type: string
+                  pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+                  description: Approved total USD budget, at most 10000. No exponent notation or numeric JSON values.
+                quote_id:
+                  type: string
+                  description: Quote fingerprint returned by the quote-only request.
+      responses:
+        "200":
+          description: A quote requiring confirmation, or the accepted run.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/SavedUSDRun"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/recipes/runs/{runId}:
+    parameters:
+      - name: runId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Recipes
+      operationId: getRecipeRun
+      summary: Check a recipe or workflow run
+      description: |
+        Only USD runs started by the current API key can be read; other keys and legacy credit runs are not accessible.
+        The run's state and each step's task. `uri` is the first result of a finished step; get download links and full details
+        from `GET /api/v1/jobs/recordInfo?taskId=<jobId>`.
+      responses:
+        "200":
+          description: The run.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/SavedUSDRun"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/recipes/runs/{runId}/resume:
+    parameters:
+      - name: runId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags:
+        - Recipes
+      operationId: resumeRecipeRun
+      summary: Quote or resume a paused USD run
+      description: |
+        Only the original API key may resume a paused USD run. Send {} to get a new quote, then confirm currency/max_usd/quote_id.
+        max_usd is the total approved budget including already spent and in-flight commitments, not an additional allowance.
+        Original inputs, API key, payer and source country are preserved. Changed key IP policy requires a new run.
+        Missing or stale approval returns needs_confirmation=true without resuming. No Idempotency-Key is required;
+        a repeated call after successful resume returns conflict rather than restarting tasks.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                currency:
+                  type: string
+                  const: USD
+                max_usd:
+                  type: string
+                  pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+                  description: Total approved USD budget, including spent and committed amounts; at most 10000.
+                quote_id:
+                  type: string
+      responses:
+        "200":
+          description: A fresh quote or the resumed run.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/SavedUSDRun"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          $ref: "#/components/responses/PaymentRequired"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/skills:
+    get:
+      tags:
+        - Recipes
+      operationId: listSkills
+      summary: List your Poppie skills
+      description: Your own skills and the ones shared with a team you belong to. Read one to get its instructions.
+      responses:
+        "200":
+          description: Your skills.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    type: object
+                    required:
+                      - items
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/SavedSkill"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/skills/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags:
+        - Recipes
+      operationId: getSkill
+      summary: Read one skill's instructions
+      description: |
+        `body` is the skill's instructions (SKILL.md), returned for your own skills and for team skills shared as viewable. Skills shared as use-only have no `body`.
+      responses:
+        "200":
+          description: The skill.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/SavedSkill"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/agent-skills:
+    get:
+      tags:
+        - Agent Skills
+      operationId: listAgentSkills
+      summary: List or search agent skills
+      description: |
+        The skill catalog, best first. All filters are optional: `type` keeps one kind of result, `task` keeps skills tagged with that task,
+        and `q` ranks by relevance to free text (name, tasks, summary) and leaves out skills that match none of its words.
+        Only metadata is returned; download a package with `GET /api/v1/agent-skills/{slug}/download`.
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 200
+        - name: type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - video
+              - image
+              - slides
+              - web
+        - name: task
+          in: query
+          required: false
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        "200":
+          description: Matching skills.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    type: object
+                    required:
+                      - items
+                      - total
+                    properties:
+                      items:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/AgentSkill"
+                      total:
+                        type: integer
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/agent-skills/{slug}:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9-]*$
+    get:
+      tags:
+        - Agent Skills
+      operationId: getAgentSkill
+      summary: Get one agent skill with install instructions
+      description: |
+        The skill's metadata plus `install`: the folder name inside the package, the download path, the install prompt to paste into an agent,
+        and for each supported agent its personal and project skills folders, how to call the skill, and a shell command that downloads and unzips it
+        (it reads your key from `$POPNOW_API_KEY`).
+      responses:
+        "200":
+          description: The skill.
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - code
+                  - msg
+                  - data
+                properties:
+                  code:
+                    type: integer
+                    const: 200
+                  msg:
+                    type: string
+                  data:
+                    $ref: "#/components/schemas/AgentSkillDetail"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/ServerError"
+  /api/v1/agent-skills/{slug}/download:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9-]*$
+    get:
+      tags:
+        - Agent Skills
+      operationId: downloadAgentSkill
+      summary: Download an agent skill package
+      description: |
+        Redirects (302) to a short-lived signed link for `popnow-<slug>.zip`, which holds one folder, `popnow-<slug>/`, with `SKILL.md` inside.
+        Follow the redirect (`curl -fL`) and unzip the archive into your agent's skills folder. The link expires after a few minutes and is never cached.
+
+        Each copy is licensed to your account: it carries `popnow-<slug>/.popnow-license.json` and a `License ID` line in `LICENSE.txt`.
+
+        Skills are free, with a limit on how many **different** skills an account adds (the website, this endpoint and the MCP `use_skill` tool share it).
+        Downloading a skill you already added never counts. Accounts that have never bought credits can add 5 new skills in any 24 hours and 20 in total;
+        accounts that have bought credits can add 30 new skills in any 24 hours with no total limit. Over the limit the API answers 429 with business code
+        `42901` and `data.reason = "skill_quota"`; `data.scope` is `daily` (with `retryAfter` seconds, `resetAt` and a `Retry-After` header) or `lifetime`.
+      responses:
+        "302":
+          description: Redirect to the package.
+          headers:
+            Location:
+              description: Short-lived signed download link.
+              schema:
+                type: string
+                format: uri
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          description: Too many requests in a minute, or the skill limit (business code 42901, data.reason skill_quota) was reached.
+          headers:
+            Retry-After:
+              $ref: "#/components/headers/RetryAfter"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "500":
+          $ref: "#/components/responses/ServerError"
+        "503":
+          $ref: "#/components/responses/Unavailable"
 components:
   securitySchemes:
     bearerAuth:
@@ -1477,6 +2456,14 @@ components:
         type: string
         minLength: 1
         maxLength: 128
+    RequestTags:
+      name: X-PopNow-Tags
+      in: header
+      required: false
+      description: "Up to 10 comma-separated tags for this task (letters, digits and `. _ - : /`, at most 40 characters each, stored lower-cased). Tags are shown in the console logs, can be used to filter logs and split usage, and are kept with the task's billing record. They never reach the model and never change the price. Do not put personal data in tags; use `metadata` for values that should be removed together with the prompt."
+      schema:
+        type: string
+        example: checkout,exp:b
     PopNowRetention:
       name: X-PopNow-Retention
       in: header
@@ -1489,6 +2476,16 @@ components:
         type: string
         pattern: ^-?[0-9]+$
   headers:
+    PopNowTaskId:
+      description: The PopNow task (`job_…`) that ran this synchronous text request — the same `taskId` that `GET /api/v1/jobs` and `recordInfo` return, so a call can be matched to its charge. Set as soon as the request is accepted, including on error responses returned after acceptance (the task shows the refund). Absent when the request was rejected before a task was created (for example a validation error), and on a streamed response whose headers were already flushed by a keep-alive before acceptance.
+      schema:
+        type: string
+    PopNowKeepalive:
+      description: Present, with the value `1`, only on a non-streaming text response that was still running after about 30 seconds. The `200` status was sent early to keep the connection open, the body starts with whitespace (newlines sent every 15 seconds), and then comes the JSON answer — or, if the request failed after that point, the protocol's own error object with the code and message it would otherwise have had. Absent on responses that finished sooner, which are unchanged.
+      schema:
+        type: string
+        enum:
+          - "1"
     RateLimitLimit:
       description: Capacity of the active account-level rate-limit window.
       schema:
@@ -1579,6 +2576,18 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/OpenAIErrorBody"
+    AnthropicError:
+      description: Error in the Anthropic `{type:"error",error:{type,message}}` shape.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AnthropicErrorBody"
+    GeminiError:
+      description: Error in the Google `{error:{code,message,status}}` shape. `status` is the google.rpc code name (for example `INVALID_ARGUMENT`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED`).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/GeminiErrorBody"
   schemas:
     FundingGrantItem:
       type: object
@@ -1765,6 +2774,31 @@ components:
                     - minor_safety
                     - image_rejected
                     - signup_paused
+                    - agent_quota
+                    - agent_rate
+                    - agent_turns
+                    - agent_skill_invalid
+                    - agent_skill_turns
+                    - price_changed
+                    - agent_project_budget
+                    - web_fetch
+                    - team_role_cannot_spend
+                    - team_allowance_reached
+                    - team_wallet_empty
+                    - team_limit_reached
+                    - skill_quota
+                    - skill_rate_needs_install
+                    - handoff_invalid
+                    - age_restricted
+                    - apple_reauth_required
+                    - pending
+                    - other_account
+                    - revoked
+                    - invalid
+                    - budget_exceeded
+                    - mfa_required
+                    - model_unavailable
+                    - model_retired
     CreateTaskRequest:
       type: object
       required:
@@ -1881,15 +2915,18 @@ components:
             - black-forest-labs/flux-3-klein-base-lora/text-to-image
             - black-forest-labs/flux-3-klein-base/edit
             - black-forest-labs/flux-3-klein-base/text-to-image
+            - black-forest-labs/flux-3-klein-lora/edit
+            - black-forest-labs/flux-3-klein-lora/text-to-image
+            - black-forest-labs/flux-3-klein/edit
+            - black-forest-labs/flux-3-klein/text-to-image
             - black-forest-labs/flux-3/image-to-video
             - black-forest-labs/flux-3/text-to-video
             - black-forest-labs/flux-3/upscale
             - black-forest-labs/flux-3/video-extend
+            - bytedance/omnihuman-2.0/talking-avatar
             - bytedance/seed-audio-1.0/text-to-audio
             - bytedance/seed-speech-2.0/text-to-speech
-            - bytedance/seedance-1.5-pro/image-to-video
-            - bytedance/seedance-1.5-pro/text-to-video
-            - bytedance/seedance-1.5-pro/video-extend
+            - bytedance/seed3d-2.0/image-to-3d
             - bytedance/seedance-2.0-fast/image-to-video
             - bytedance/seedance-2.0-fast/reference-to-video
             - bytedance/seedance-2.0-fast/text-to-video
@@ -1908,6 +2945,8 @@ components:
             - bytedance/seedance-2.5/video-extend
             - bytedance/seedream-4.0/edit
             - bytedance/seedream-4.0/text-to-image
+            - bytedance/seedream-4.5/edit
+            - bytedance/seedream-4.5/text-to-image
             - bytedance/seedream-5.0-flash/edit
             - bytedance/seedream-5.0-flash/layer-decomposition
             - bytedance/seedream-5.0-flash/text-to-image
@@ -1916,6 +2955,7 @@ components:
             - bytedance/seedream-5.0-pro/edit
             - bytedance/seedream-5.0-pro/layer-decomposition
             - bytedance/seedream-5.0-pro/text-to-image
+            - bytedance/seedvr2-video/upscale
             - circlestone-labs/anima-turbo-lora/edit
             - circlestone-labs/anima-turbo-lora/text-to-image
             - circlestone-labs/anima-turbo/edit
@@ -1930,6 +2970,8 @@ components:
             - google/nano-banana-pro/edit
             - google/nano-banana-pro/text-to-image
             - heartmula/transcribe/speech-to-text
+            - ideogram/vector-1/edit
+            - ideogram/vector-1/text-to-image
             - j1b/jib-mix-qwen-image-lora/text-to-image
             - j1b/jib-mix-qwen-image/text-to-image
             - kling/2.1-master/image-to-video
@@ -1948,6 +2990,9 @@ components:
             - kling/4.0/image-to-video
             - kling/4.0/reference-to-video
             - kling/4.0/text-to-video
+            - kling/4.0/video-edit
+            - kling/4.0/video-extend
+            - kling/avatar-2.0/talking-avatar
             - kling/o3/image-to-video
             - kling/o3/reference-to-video
             - kling/o3/text-to-video
@@ -1969,8 +3014,16 @@ components:
             - lightricks/ltx-2.5/image-to-video
             - lightricks/ltx-2.5/text-to-video
             - minimax/h3-360-orbit/image-to-video
+            - minimax/h3-character-swap/video-edit
+            - minimax/h3-edit/video-edit
+            - minimax/h3-highspeed/image-to-video
+            - minimax/h3-highspeed/reference-to-video
+            - minimax/h3-highspeed/text-to-video
             - minimax/h3-image-lora/edit
             - minimax/h3-image-lora/text-to-image
+            - minimax/h3-lite/image-to-video
+            - minimax/h3-lite/reference-to-video
+            - minimax/h3-lite/text-to-video
             - minimax/h3-lora/image-to-video
             - minimax/h3-lora/reference-to-video
             - minimax/h3-lora/text-to-video
@@ -1981,6 +3034,12 @@ components:
             - minimax/h3-singularity-lora/image-to-video
             - minimax/h3-singularity-lora/reference-to-video
             - minimax/h3-singularity-lora/video-extend
+            - minimax/h3-x-turbo/image-to-video
+            - minimax/h3-x-turbo/reference-to-video
+            - minimax/h3-x-turbo/text-to-video
+            - minimax/h3-x/image-to-video
+            - minimax/h3-x/reference-to-video
+            - minimax/h3-x/text-to-video
             - minimax/h3/image-to-video
             - minimax/h3/reference-to-video
             - minimax/h3/text-to-video
@@ -1995,27 +3054,68 @@ components:
             - openai/gpt-image-2.5-sunburst/text-to-image
             - openai/gpt-image-2/edit
             - openai/gpt-image-2/text-to-image
+            - openmoss/moss-image-lora/text-to-image
+            - openmoss/moss-image/text-to-image
+            - pixverse/v6-effects/image-to-video
+            - pixverse/v6-max/image-to-video
+            - pixverse/v6-max/text-to-video
+            - pixverse/v6/image-to-video
+            - pixverse/v6/reference-to-video
+            - pixverse/v6/text-to-video
+            - pixverse/v6/video-extend
             - popnow/anime-to-real-v1/edit
             - popnow/background-remover-v1/edit
+            - popnow/background-remover-video-v1/video-edit
             - popnow/camera-angle-changer-v1/edit
+            - popnow/face-enhancer-v1/edit
+            - popnow/face-enhancer-video-v1/video-edit
+            - popnow/face-swap-pro-v1/edit
+            - popnow/face-swap-v1-plus/edit
+            - popnow/face-swap-v1/edit
+            - popnow/face-swap-video-v1/video-edit
             - popnow/foley-v1/video-to-audio
+            - popnow/head-swap-v1/edit
             - popnow/image-expander-v1/edit
             - popnow/image-upscaler-v1/upscale
+            - popnow/lip-sync-v1/lip-sync
+            - popnow/look-alike-v1/edit
+            - popnow/music-remover-v1/video-edit
             - popnow/object-eraser-v1/edit
+            - popnow/object-extractor-v1/edit
+            - popnow/photo-colorizer-v1/edit
+            - popnow/photo-restorer-v1/edit
+            - popnow/photo-to-anime-v1/edit
             - popnow/pose-changer-v1/edit
             - popnow/relight-v1/edit
             - popnow/shadow-remover-v1/edit
+            - popnow/talking-avatar-v1/talking-avatar
+            - popnow/video-eraser-v1/video-edit
+            - popnow/video-restorer-v1/video-edit
+            - popnow/video-translator-v1/video-translate
             - popnow/video-upscaler-v1/upscale
+            - popnow/vocal-isolator-v1/audio-separation
+            - popnow/voice-cleaner-v1/audio-to-audio
             - prefect/pony-xl-lora/text-to-image
             - prefect/pony-xl/text-to-image
             - pruna-ai/p-image-lora/edit
             - pruna-ai/p-image-lora/text-to-image
+            - pruna-ai/p-video-2-pro/image-to-video
+            - pruna-ai/p-video-2-pro/reference-to-video
+            - pruna-ai/p-video-2-pro/text-to-video
+            - recraft/20b-svg/text-to-image
+            - recraft/v4-vector/text-to-image
             - resemble-ai/chatterbox-v1/text-to-speech
+            - sand-ai/davinci-magihuman/image-to-video
+            - sand-ai/davinci-magihuman/text-to-video
             - suno/v6-mini/text-to-audio
             - suno/v6-wild/text-to-audio
             - suno/v6/text-to-audio
             - tencent/hunyuan-video-1.5/image-to-video
             - tencent/hunyuan-video-1.5/text-to-video
+            - topaz/denoise-sharpen/edit
+            - tripo/h3.1/image-to-3d
+            - veed/dubbing-pro/video-translate
+            - veed/dubbing/video-translate
             - vidu/q3-pro/image-to-video
             - vidu/q3-turbo/image-to-video
             - vidu/q3-turbo/video-extend
@@ -2027,7 +3127,7 @@ components:
             - xai/grok-tts/text-to-speech
         input:
           type: object
-          description: Validated against the selected model's inputSchema (`GET /api/v1/models/{model}`). Declared media fields accept public HTTPS URLs, committed popnow://f/<id> file URIs (common/upload-url, then the file commit endpoint), saved assets as popnow://a/<id> in the media field of the matching kind (the asset must be in the library of the key's workspace; any other asset gets the same rejection as an unknown id), or standard Base64 Data URIs (image/jpeg, image/png, image/webp, image/gif). Inline images are limited to 1048576 decoded bytes and 8388608 pixels each, 8192 pixels per side, and 16 images / 16777216 pixels in total. The complete JSON request must fit within 2097152 bytes. Model-specific limits still apply. Bare Base64, SVG and inline audio/video are not accepted; use HTTPS or file uploads instead. Inline images are stored as account-bound uploaded files; returned input contains file URIs, never the original Base64 bytes. Quote validation does not upload or reserve credits. If the model's inputSchema declares `seed` and you omit it, we pick a random seed for this task, so two identical requests do not come back with the same output. The chosen seed is returned in the task's `input`; pass it back to hold the draw steady (a fixed seed keeps runs comparable, it does not guarantee an identical result). A `seed` you send yourself is always used as given.
+          description: Validated against the selected model's inputSchema (`GET /api/v1/models/{model}`). Declared media fields accept public HTTPS URLs, committed popnow://f/<id> file URIs (common/upload-url, then the file commit endpoint), saved assets as popnow://a/<id> in the media field of the matching kind (the asset must be in the library of the key's workspace; any other asset gets the same rejection as an unknown id), or standard Base64 Data URIs (image/jpeg, image/png, image/webp, image/gif). Inline images are limited to 1048576 decoded bytes and 8388608 pixels each, 8192 pixels per side, and 16 images / 16777216 pixels in total. The complete JSON request must fit within 2097152 bytes. Model-specific limits still apply. Bare Base64, SVG and inline audio/video are not accepted; use HTTPS or file uploads instead. Inline images are stored as account-bound uploaded files; returned input contains file URIs, never the original Base64 bytes. Quote validation does not upload or hold funds. If the model's inputSchema declares `seed` and you omit it, we pick a random seed for this task, so two identical requests do not come back with the same output. The chosen seed is returned in the task's `input`; pass it back to hold the draw steady (a fixed seed keeps runs comparable, it does not guarantee an identical result). A `seed` you send yourself is always used as given.
           additionalProperties: true
         callBackUrl:
           type: string
@@ -2040,12 +3140,25 @@ components:
         expectedCost:
           allOf:
             - $ref: "#/components/schemas/USDString"
-          description: Confirmed amount to reserve, with up to nine decimal places. A changed price returns business code 40901 before reservation.
+          description: Legacy name for expectedCostUsd; an exact USD decimal string. Both names must match when supplied together.
+          deprecated: true
         expectedCredits:
           type: integer
           format: int64
           minimum: 0
-          description: Confirmed number of credits to reserve, as returned in `maxCredits` by jobs/quote. 1 credit = $0.001. Send this or `expectedCost` (the same amount in USD); when both are sent, `expectedCredits` wins. A changed price returns business code 40901 before anything is reserved.
+          description: Deprecated integer display projection (1 credit = $0.001). With quoteId or an explicit USD amount, it must equal ceil(confirmed USD / 0.001); it never overrides the exact amount. Alone it confirms exactly expectedCredits × $0.001, so use quoteId or expectedCostUsd for fractional-USD quotes. Send maxCredits, not the quote response's typical expectedCredits.
+          deprecated: true
+        metadata:
+          type: object
+          maxProperties: 16
+          additionalProperties:
+            type: string
+            maxLength: 256
+          description: "Optional key-value pairs for your own bookkeeping (for example an order ID or your end user's ID): at most 16 keys of up to 40 characters, string values of up to 256 characters, and at most 4096 bytes encoded. Stored with the task and shown in the console log detail; never sent to the model and never part of the price or of the Idempotency-Key fingerprint. Removed together with the prompt when the task content is deleted or expires. Invalid metadata returns 400 before anything is reserved."
+        expectedCostUsd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Recommended exact USD hold confirmation. Send maxChargeUsd from jobs/quote, or send quoteId alone. Up to nine decimal places; no exponent notation. When expectedCost is also supplied, both USD values must match.
     TaskQuoteResponse:
       type: object
       required:
@@ -2059,6 +3172,9 @@ components:
         - expiresAt
         - maxCredits
         - expectedCredits
+        - maxChargeUsd
+        - expectedChargeUsd
+        - expectedCharge
       additionalProperties: false
       properties:
         quoteId:
@@ -2074,12 +3190,14 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: The most this request can cost, in credits (1 credit = $0.001). This amount is held when the task is accepted; it equals `maxCharge`.
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
         expectedCredits:
           type: integer
           format: int64
           minimum: 0
-          description: What this request usually costs, in credits. Equal to `maxCredits` unless the final charge depends on the output (for example its real duration); you are never charged more than `maxCredits`.
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
         currency:
           type: string
           const: USD
@@ -2091,6 +3209,18 @@ components:
         expiresAt:
           type: string
           format: date-time
+        maxChargeUsd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Exact maximum USD charge and amount held on acceptance; same value as maxCharge and estimatedCost. Recommended for expectedCostUsd.
+        expectedChargeUsd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Exact typical USD charge, never above maxChargeUsd. Informational; do not use the typical charge to confirm the maximum hold.
+        expectedCharge:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Legacy USD alias of expectedChargeUsd.
     TaskQuoteEnvelope:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"
@@ -2108,6 +3238,7 @@ components:
         - estimatedCost
         - deadlineAt
         - estimatedCredits
+        - estimatedCostUsd
       properties:
         taskId:
           type: string
@@ -2133,7 +3264,12 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Credits held when the task was accepted (the same amount as `estimatedCost`); the most this task can cost. Unused credits are released when it settles.
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
+        estimatedCostUsd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Exact USD held on acceptance. Same as estimatedCost; unused held funds are released at settlement.
     TaskActionRequest:
       type: object
       required:
@@ -2340,7 +3476,7 @@ components:
           format: int64
         role:
           type: string
-          description: "What the asset is: `video`, `image`, `audio` or a model-specific role. Video extend endpoints that join the source clip to the new footage return two assets in a fixed order: the joined clip first (`video`), then the newly generated part on its own (`segment`). Endpoints that return only the new part have no `segment` asset."
+          description: "What the asset is: `video`, `image`, `audio` or a model-specific role. Video extend endpoints that join the source clip to the new footage return two assets in a fixed order: the joined clip first (`video`), then the newly generated part on its own (`segment`). Endpoints that return only the new part have no `segment` asset. Video translation endpoints return the dubbed clip (`video`) and, where the model produces one, a subtitle file of the translated speech (`subtitle`, `mime` `application/x-subrip`, an `.srt` file); the subtitle is kept for the same retention period as the video."
         pending:
           type: boolean
         unavailable:
@@ -2376,6 +3512,8 @@ components:
         - settled
         - createdAt
         - credits
+        - exactCredits
+        - costUsd
       properties:
         taskId:
           type: string
@@ -2422,7 +3560,13 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: The same amount as `cost`, in credits (1 credit = $0.001), rounded up to a whole credit. Before settlement it is the held amount; after settlement it is the final charge.
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
+        exactCredits:
+          type: string
+          pattern: "^[0-9]+(\\\\.[0-9]+)?$"
+          description: Legacy unrounded credit-scale decimal string (USD × 1000). Use cost/costUsd for USD amounts.
+          deprecated: true
         settled:
           type: boolean
           description: When false, `cost` is the held estimate. When true, `cost` is the final charge. On success the final charge is capped at that hold; unused funds are released. Failed or expired tasks normally release the hold in full; the one exception is a `content_rejected` task on a model whose page states that such refusals are billed, which is settled at the accepted estimate.
@@ -2455,6 +3599,10 @@ components:
           description: Present only for a task destroyed with `purgeTask`. Expiry does not set it.
         retention:
           $ref: "#/components/schemas/TaskRetention"
+        costUsd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Exact USD charge when settled, otherwise the exact hold. Same as cost; recommended for reconciliation.
     TaskRetention:
       type: object
       description: When this task's content is scheduled to be removed, and which layer decided it. Omitted for tasks created before per-task retention existed; those follow the platform maximum.
@@ -2505,12 +3653,13 @@ components:
         - createdAt
         - deadlineAt
         - credits
+        - exactCredits
       properties:
         taskId:
           type: string
         requestId:
           type: string
-          description: The `X-Request-Id` of the request that created this task. Omitted when no request id was recorded.
+          description: The `X-Request-Id` of the request that created this task. Chat calls (`/v1/chat/completions`, `/v1/responses`, `/v1/messages`, Gemini) can be matched to their task with it, or with the `X-PopNow-Task-Id` response header. Omitted when no request id was recorded.
         model:
           type: string
           description: Model call name, `<publisher>/<model>/<task>`.
@@ -2531,7 +3680,13 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: The same amount as `cost`, in credits, rounded up to a whole credit.
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
+        exactCredits:
+          type: string
+          pattern: "^[0-9]+(\\\\.[0-9]+)?$"
+          description: Legacy unrounded credit-scale decimal string (USD × 1000). Use cost/costUsd for USD amounts.
+          deprecated: true
         settled:
           type: boolean
         createdAt:
@@ -2606,7 +3761,8 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Total settled spend in credits (the same amount as `totalSpend`).
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
         days:
           type: array
           items:
@@ -2647,7 +3803,8 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Settled spend in credits (the same amount as `spend`).
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
     UsageModelItem:
       type: object
       additionalProperties: false
@@ -2680,7 +3837,8 @@ components:
           type: integer
           format: int64
           minimum: 0
-          description: Settled spend in credits (the same amount as `spend`).
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
     APIKeyUsageEnvelope:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"
@@ -2699,6 +3857,9 @@ components:
         - availableCredits
         - heldCredits
         - totalCredits
+        - availableUsd
+        - heldUsd
+        - totalUsd
       properties:
         funding:
           $ref: "#/components/schemas/FundingOverview"
@@ -2711,16 +3872,31 @@ components:
         availableCredits:
           type: integer
           format: int64
-          description: Credits you can spend now (the same amount as `available`, rounded down to a whole credit).
+          description: Legacy display projection of available USD, truncated toward zero at 1 credit = $0.001. Use availableUsd for the exact API wallet balance.
+          deprecated: true
         heldCredits:
           type: integer
           format: int64
           minimum: 0
-          description: Credits held by accepted tasks that have not settled yet.
+          description: Legacy display projection at 1 credit = $0.001. Integer values round upward; use the USD fields for exact amounts and reconciliation.
+          deprecated: true
         totalCredits:
           type: integer
           format: int64
-          description: "`availableCredits` + `heldCredits`."
+          description: Legacy sum of availableCredits and heldCredits; not an exact USD balance. Use totalUsd.
+          deprecated: true
+        availableUsd:
+          type: string
+          pattern: "^-?[0-9]+(\\.[0-9]{1,9})?$"
+          description: "Exact USD in the independent API wallet. Legacy alias: available."
+        heldUsd:
+          type: string
+          pattern: "^-?[0-9]+(\\.[0-9]{1,9})?$"
+          description: "Exact USD in the independent API wallet. Legacy alias: held."
+        totalUsd:
+          type: string
+          pattern: "^-?[0-9]+(\\.[0-9]{1,9})?$"
+          description: "Exact USD in the independent API wallet. Legacy alias: total."
     BalanceEnvelope:
       allOf:
         - $ref: "#/components/schemas/EnvelopeBase"
@@ -2756,6 +3932,7 @@ components:
         - relatedModels
         - updatedAt
         - credits
+        - usd
       properties:
         model:
           type: string
@@ -2772,6 +3949,7 @@ components:
         modality:
           type: string
           enum:
+            - text
             - image
             - video
             - audio
@@ -2805,16 +3983,66 @@ components:
           type: string
         credits:
           type: object
-          description: "Price in credits (1 credit = $0.001), the same price popnow.ai shows. `unit` is how the price scales (`per_image`, `per_second`, `per_request`…), `perUnit` is the starting price per unit, and `rules` lists the tiers: each rule applies when the request matches its `when` values (`*` matches the field that sets the tier). Use jobs/quote for the exact amount of one request."
+          description: Deprecated credit-scale rate snapshot retained for compatibility. It may lose precision; use usd and jobs/quote for API prices.
           required:
             - unit
-            - perUnit
           properties:
             unit:
               type: string
             perUnit:
               type: number
               minimum: 0
+            blocks:
+              type: object
+              description: Duration is rounded up to whole billing blocks, subject to the stated minimum and cap. Refer to the model for whether duration means input or output.
+              required:
+                - seconds
+              properties:
+                seconds:
+                  type: integer
+                  minimum: 1
+                min:
+                  type: integer
+                  minimum: 1
+                cap:
+                  type: integer
+                  minimum: 1
+            input:
+              type: number
+              minimum: 0
+              description: Chat models only. Credits per 1M input tokens.
+            output:
+              type: number
+              minimum: 0
+              description: Chat models only. Credits per 1M output tokens (reasoning tokens count as output).
+            cachedInput:
+              type: number
+              minimum: 0
+              description: Chat models only. Credits per 1M cached input tokens.
+            cacheWrite:
+              type: number
+              minimum: 0
+              description: Chat models only. Credits per 1M tokens written to the prompt cache.
+            longContext:
+              type: object
+              description: Chat models only. Prices for requests whose input exceeds thresholdTokens (reaches it when inclusive is true).
+              properties:
+                thresholdTokens:
+                  type: integer
+                inclusive:
+                  type: boolean
+                input:
+                  type: number
+                  minimum: 0
+                cachedInput:
+                  type: number
+                  minimum: 0
+                cacheWrite:
+                  type: number
+                  minimum: 0
+                output:
+                  type: number
+                  minimum: 0
             rules:
               type: array
               items:
@@ -2832,6 +4060,7 @@ components:
                   unit:
                     type: string
           additionalProperties: true
+          deprecated: true
         inputSchema:
           type: object
           description: "JSON Schema draft 2020-12 used by `createTask.input` validation and Playground rendering. Standard JSON Schema keywords validate. Presentation hints live only in a per-property `x-ui` object whose keys are snake_case and drawn from a closed set: `widget`, `order`, `label`, `placeholder`, `rows`, `step`, `unit`, `accept`, `max_size_mb`, `max_duration_seconds`, `max_total_duration_seconds`, `advanced`, `primary`, `affects_price`, `visible_when`, `enum_labels`, `reference_tokens`, `reference_sequence`, `reference_regions`, `mask`. `x-ui.order` is the only source of field order (descending first). `x-ui.widget` is one of `textarea`, `text`, `upload`, `multi-upload`, `select`, `radio`, `slider`, `number`, `switch`, `json`, `object-list`, `chat-messages`, `hidden`. Root-level composition is limited to `anyOf`, where every branch contains only `required`, and `allOf`, where each branch is `if` (`required` or `properties.*.const`) plus `then` (`required`); `oneOf`, `not` and `dependentSchemas` never appear. Unknown hints must be ignored."
@@ -2857,8 +4086,10 @@ components:
               - commercial_restricted
               - reference_input
               - audio_output
+              - streaming
               - fast_tier
               - high_resolution
+              - long_context
         relatedModels:
           type: array
           description: Curated model identifiers suitable for alternatives or workflow steps.
@@ -2872,6 +4103,80 @@ components:
         updatedAt:
           type: string
           format: date-time
+        usd:
+          type: object
+          description: USD rate snapshot. Monetary values are exact decimal strings; units, tier conditions and token thresholds retain their original meaning. Use jobs/quote for the authoritative current hold. No website-credit rounding applies.
+          required:
+            - unit
+            - currency
+          properties:
+            unit:
+              type: string
+            perUnit:
+              type: string
+            blocks:
+              type: object
+              description: Duration is rounded up to whole billing blocks, subject to the stated minimum and cap. Refer to the model for whether duration means input or output.
+              required:
+                - seconds
+              properties:
+                seconds:
+                  type: integer
+                  minimum: 1
+                min:
+                  type: integer
+                  minimum: 1
+                cap:
+                  type: integer
+                  minimum: 1
+            input:
+              type: string
+              description: Chat models only. USD per 1M input tokens.
+            output:
+              type: string
+              description: Chat models only. USD per 1M output tokens (reasoning tokens count as output).
+            cachedInput:
+              type: string
+              description: Chat models only. USD per 1M cached input tokens.
+            cacheWrite:
+              type: string
+              description: Chat models only. USD per 1M tokens written to the prompt cache.
+            longContext:
+              type: object
+              description: Chat models only. Prices for requests whose input exceeds thresholdTokens (reaches it when inclusive is true).
+              properties:
+                thresholdTokens:
+                  type: integer
+                inclusive:
+                  type: boolean
+                input:
+                  type: string
+                cachedInput:
+                  type: string
+                cacheWrite:
+                  type: string
+                output:
+                  type: string
+            rules:
+              type: array
+              items:
+                type: object
+                required:
+                  - when
+                  - perUnit
+                properties:
+                  when:
+                    type: object
+                    additionalProperties: true
+                  perUnit:
+                    type: string
+                  unit:
+                    type: string
+            currency:
+              type: string
+              enum:
+                - USD
+          additionalProperties: true
     APIModelExample:
       type: object
       required:
@@ -3605,6 +4910,38 @@ components:
             code:
               type: string
               description: Stable machine-readable reason, for example `invalid_request`, `unsupported_parameter` (the model does not accept this field or value), `content_rejected` (the model's content policy refused the request; HTTP 400, and retrying the same input will be refused again), `model_not_found`, `invalid_api_key`, `insufficient_balance`, `model_not_allowed`, `model_unavailable`, `rate_limit_exceeded`, `upstream_failed`.
+    AnthropicErrorBody:
+      type: object
+      required:
+        - type
+        - error
+      properties:
+        type:
+          type: string
+          const: error
+        error:
+          type: object
+          required:
+            - type
+            - message
+          properties:
+            type:
+              type: string
+              enum:
+                - invalid_request_error
+                - authentication_error
+                - billing_error
+                - permission_error
+                - not_found_error
+                - request_too_large
+                - rate_limit_error
+                - api_error
+                - overloaded_error
+            message:
+              type: string
+            code:
+              type: string
+              description: "PopNow extension: the same stable reason as `error.code` in the OpenAI shape (for example `content_rejected`, `unsupported_parameter`, `invalid_request`). Official Anthropic SDKs ignore it; read it from the raw error body to tell a content-policy refusal from a bad parameter."
     OpenAIModelList:
       type: object
       required:
@@ -3639,13 +4976,694 @@ components:
               modality:
                 type: string
                 enum:
+                  - text
                   - image
                   - video
                   - audio
                 description: PopNow extension. Output modality.
               task:
                 type: string
-                description: PopNow extension. The task this call name runs, for example `text-to-video`.
+                description: PopNow extension. The task this call name runs, for example `chat` or `text-to-video`. Only `chat` models work on the chat operations.
+              context_length:
+                type: integer
+                description: PopNow extension, chat models only. The most input tokens one request can send.
+              max_output_tokens:
+                type: integer
+                description: PopNow extension, chat models only. The largest `max_tokens` value the model accepts.
+              supported_parameters:
+                type: array
+                items:
+                  type: string
+                description: "PopNow extension, chat models only. Request fields this model accepts (the top-level fields of its input schema). `stream`, `stream_options`, `user`, `metadata` and `store` are handled by the compatible layer for every model and are not listed. Any other field returns `400` with `code: unsupported_parameter`."
+              credits:
+                type: object
+                description: Deprecated credit-scale rate snapshot; use usd for exact API prices.
+                required:
+                  - unit
+                properties:
+                  unit:
+                    type: string
+                  perUnit:
+                    type: number
+                    minimum: 0
+                  blocks:
+                    type: object
+                    description: Duration is rounded up to whole billing blocks, subject to the stated minimum and cap. Refer to the model for whether duration means input or output.
+                    required:
+                      - seconds
+                    properties:
+                      seconds:
+                        type: integer
+                        minimum: 1
+                      min:
+                        type: integer
+                        minimum: 1
+                      cap:
+                        type: integer
+                        minimum: 1
+                  input:
+                    type: number
+                    minimum: 0
+                    description: Chat models only. Credits per 1M input tokens.
+                  output:
+                    type: number
+                    minimum: 0
+                    description: Chat models only. Credits per 1M output tokens (reasoning tokens count as output).
+                  cachedInput:
+                    type: number
+                    minimum: 0
+                    description: Chat models only. Credits per 1M cached input tokens.
+                  cacheWrite:
+                    type: number
+                    minimum: 0
+                    description: Chat models only. Credits per 1M tokens written to the prompt cache.
+                  longContext:
+                    type: object
+                    description: Chat models only. Prices for requests whose input exceeds thresholdTokens (reaches it when inclusive is true).
+                    properties:
+                      thresholdTokens:
+                        type: integer
+                      inclusive:
+                        type: boolean
+                      input:
+                        type: number
+                        minimum: 0
+                      cachedInput:
+                        type: number
+                        minimum: 0
+                      cacheWrite:
+                        type: number
+                        minimum: 0
+                      output:
+                        type: number
+                        minimum: 0
+                  rules:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - when
+                        - perUnit
+                      properties:
+                        when:
+                          type: object
+                          additionalProperties: true
+                        perUnit:
+                          type: number
+                          minimum: 0
+                        unit:
+                          type: string
+                additionalProperties: true
+                deprecated: true
+              usd:
+                type: object
+                description: USD rate snapshot. Monetary values are exact decimal strings; units, tier conditions and token thresholds retain their original meaning. Use jobs/quote for the authoritative current hold. No website-credit rounding applies.
+                required:
+                  - unit
+                  - currency
+                properties:
+                  unit:
+                    type: string
+                  perUnit:
+                    type: string
+                  blocks:
+                    type: object
+                    description: Duration is rounded up to whole billing blocks, subject to the stated minimum and cap. Refer to the model for whether duration means input or output.
+                    required:
+                      - seconds
+                    properties:
+                      seconds:
+                        type: integer
+                        minimum: 1
+                      min:
+                        type: integer
+                        minimum: 1
+                      cap:
+                        type: integer
+                        minimum: 1
+                  input:
+                    type: string
+                    description: Chat models only. USD per 1M input tokens.
+                  output:
+                    type: string
+                    description: Chat models only. USD per 1M output tokens (reasoning tokens count as output).
+                  cachedInput:
+                    type: string
+                    description: Chat models only. USD per 1M cached input tokens.
+                  cacheWrite:
+                    type: string
+                    description: Chat models only. USD per 1M tokens written to the prompt cache.
+                  longContext:
+                    type: object
+                    description: Chat models only. Prices for requests whose input exceeds thresholdTokens (reaches it when inclusive is true).
+                    properties:
+                      thresholdTokens:
+                        type: integer
+                      inclusive:
+                        type: boolean
+                      input:
+                        type: string
+                      cachedInput:
+                        type: string
+                      cacheWrite:
+                        type: string
+                      output:
+                        type: string
+                  rules:
+                    type: array
+                    items:
+                      type: object
+                      required:
+                        - when
+                        - perUnit
+                      properties:
+                        when:
+                          type: object
+                          additionalProperties: true
+                        perUnit:
+                          type: string
+                        unit:
+                          type: string
+                  currency:
+                    type: string
+                    enum:
+                      - USD
+                additionalProperties: true
+    ChatCompletionRequest:
+      type: object
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+        messages:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required:
+              - role
+            properties:
+              role:
+                type: string
+              content:
+                oneOf:
+                  - type:
+                      - string
+                      - "null"
+                  - type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+              tool_call_id:
+                type: string
+              tool_calls:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: true
+              reasoning_content:
+                type: string
+                description: Optional assistant reasoning text; availability and message roles follow the selected model input schema.
+            additionalProperties: true
+        stream:
+          type: boolean
+          default: false
+        max_tokens:
+          type: integer
+        max_completion_tokens:
+          type: integer
+          description: Alias of `max_tokens`.
+        temperature:
+          type: number
+        top_p:
+          type: number
+        top_k:
+          type: integer
+          description: Sample only from the k most likely next tokens; only on models that declare it.
+        seed:
+          type: integer
+          description: Best-effort repeatable sampling; only on models that declare it.
+        stop:
+          description: Up to 4 stop sequences (some models accept only one); only on models that declare it.
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: string
+        tools:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tool_choice:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: true
+        parallel_tool_calls:
+          type: boolean
+          description: Set false to allow at most one tool call per turn; only on models that declare it.
+        response_format:
+          type: object
+          additionalProperties: true
+      additionalProperties:
+        description: Forwarded to the model input schema and rejected when undeclared.
+    ChatCompletion:
+      type: object
+      required:
+        - id
+        - object
+        - created
+        - model
+        - choices
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: chat.completion
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            required:
+              - index
+              - message
+              - finish_reason
+            properties:
+              index:
+                type: integer
+              message:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  content:
+                    type:
+                      - string
+                      - "null"
+                  refusal:
+                    type: string
+                  reasoning_content:
+                    type: string
+                    description: Optional reasoning text returned by models that expose it. Streaming chunks use the same field in delta.
+                  tool_calls:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+              finish_reason:
+                type: string
+              logprobs:
+                type: "null"
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+            prompt_tokens_details:
+              type: object
+              properties:
+                cached_tokens:
+                  type: integer
+                cache_creation_input_tokens:
+                  type: integer
+                cache_read_input_tokens:
+                  type: integer
+            completion_tokens_details:
+              type: object
+              properties:
+                reasoning_tokens:
+                  type: integer
+                  description: Included in completion_tokens; do not add it again when calculating usage.
+    ResponsesRequest:
+      type: object
+      required:
+        - model
+        - input
+      properties:
+        model:
+          type: string
+        input:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+        instructions:
+          type: string
+        max_output_tokens:
+          type: integer
+        temperature:
+          type: number
+        top_p:
+          type: number
+        tools:
+          type: array
+          items:
+            type: object
+        tool_choice:
+          oneOf:
+            - type: string
+            - type: object
+        text:
+          type: object
+        reasoning:
+          type: object
+          properties:
+            effort:
+              type: string
+        stream:
+          type: boolean
+          default: false
+    ResponseObject:
+      type: object
+      required:
+        - id
+        - object
+        - created_at
+        - status
+        - model
+        - output
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          const: response
+        created_at:
+          type: integer
+        status:
+          type: string
+          enum:
+            - completed
+            - incomplete
+            - in_progress
+        model:
+          type: string
+        output:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - type
+              - status
+            properties:
+              id:
+                type: string
+              type:
+                type: string
+                enum:
+                  - message
+                  - function_call
+              status:
+                type: string
+              role:
+                type: string
+              content:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    type:
+                      type: string
+                      const: output_text
+                    text:
+                      type: string
+                    annotations:
+                      type: array
+                      items:
+                        type: object
+              call_id:
+                type: string
+              name:
+                type: string
+              arguments:
+                type: string
+        error:
+          type: "null"
+        incomplete_details:
+          type:
+            - object
+            - "null"
+          properties:
+            reason:
+              type: string
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+    GeminiGenerateContentRequest:
+      type: object
+      required:
+        - contents
+      description: Google Gemini `generateContent` request. Which generation parameters a model accepts comes from that model's `inputSchema` in `/v1/models` and the catalog. Sampling parameters the model does not declare (temperature, topP, topK, penalties) are ignored and listed in the `X-PopNow-Ignored-Params` response header; any other unsupported parameter returns 400.
+      properties:
+        contents:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+                enum:
+                  - user
+                  - model
+              parts:
+                type: array
+                items:
+                  type: object
+                  description: One of `text`, `inlineData {mimeType,data}`, `fileData {mimeType,fileUri}`, `functionCall {name,args}`, `functionResponse {name,response}`.
+        systemInstruction:
+          type: object
+        tools:
+          type: array
+          items:
+            type: object
+        toolConfig:
+          type: object
+        generationConfig:
+          type: object
+          properties:
+            temperature:
+              type: number
+            topP:
+              type: number
+            maxOutputTokens:
+              type: integer
+            stopSequences:
+              type: array
+              items:
+                type: string
+            responseMimeType:
+              type: string
+            responseSchema:
+              type: object
+            thinkingConfig:
+              type: object
+    GeminiGenerateContentResponse:
+      type: object
+      properties:
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              content:
+                type: object
+                properties:
+                  role:
+                    type: string
+                  parts:
+                    type: array
+                    items:
+                      type: object
+              finishReason:
+                type: string
+        usageMetadata:
+          type: object
+          properties:
+            promptTokenCount:
+              type: integer
+            candidatesTokenCount:
+              type: integer
+            totalTokenCount:
+              type: integer
+            cachedContentTokenCount:
+              type: integer
+            thoughtsTokenCount:
+              type: integer
+        modelVersion:
+          type: string
+          description: The PopNow model identifier.
+        responseId:
+          type: string
+    GeminiErrorBody:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+            - status
+          properties:
+            code:
+              type: integer
+            message:
+              type: string
+            status:
+              type: string
+            details:
+              type: array
+              description: "One `google.rpc.ErrorInfo` whose `reason` is the upper-case form of the OpenAI-shape `error.code` (for example `CONTENT_REJECTED`, `UNSUPPORTED_PARAMETER`, `INVALID_REQUEST`) and whose `domain` is `api.popnow.ai`. `status` alone cannot tell a content-policy refusal from a bad parameter: both are `INVALID_ARGUMENT`."
+              items:
+                type: object
+                required:
+                  - "@type"
+                  - reason
+                  - domain
+                properties:
+                  "@type":
+                    type: string
+                    const: type.googleapis.com/google.rpc.ErrorInfo
+                  reason:
+                    type: string
+                  domain:
+                    type: string
+    AnthropicMessageRequest:
+      type: object
+      required:
+        - model
+        - messages
+        - max_tokens
+      properties:
+        model:
+          type: string
+        system:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+        messages:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required:
+              - role
+              - content
+            properties:
+              role:
+                type: string
+                enum:
+                  - user
+                  - assistant
+              content:
+                oneOf:
+                  - type: string
+                  - type: array
+                    items:
+                      type: object
+        max_tokens:
+          type: integer
+        temperature:
+          type: number
+        top_p:
+          type: number
+        top_k:
+          type: integer
+        stop_sequences:
+          type: array
+          items:
+            type: string
+        tools:
+          type: array
+          items:
+            type: object
+        tool_choice:
+          type: object
+          description: "`disable_parallel_tool_use: true` is translated to `parallel_tool_calls: false`."
+        stream:
+          type: boolean
+          default: false
+    AnthropicMessage:
+      type: object
+      required:
+        - id
+        - type
+        - role
+        - model
+        - content
+        - stop_reason
+        - usage
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          const: message
+        role:
+          type: string
+          const: assistant
+        model:
+          type: string
+        content:
+          type: array
+          items:
+            type: object
+            required:
+              - type
+            properties:
+              type:
+                type: string
+                enum:
+                  - text
+                  - tool_use
+              text:
+                type: string
+              id:
+                type: string
+              name:
+                type: string
+              input:
+                type: object
+        stop_reason:
+          type: string
+          enum:
+            - end_turn
+            - max_tokens
+            - tool_use
+        stop_sequence:
+          type: "null"
+        usage:
+          type: object
+          properties:
+            input_tokens:
+              type: integer
+            output_tokens:
+              type: integer
     VideoCreateRequest:
       type: object
       required:
@@ -3718,3 +5736,344 @@ components:
               type: string
             message:
               type: string
+    SavedRecipe:
+      type: object
+      required:
+        - id
+        - kind
+        - name
+        - mine
+        - media
+        - inputs
+        - steps
+        - currency
+        - updatedAt
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+          enum:
+            - recipe
+            - workflow
+        name:
+          type: string
+        mine:
+          type: boolean
+        teamId:
+          type: string
+          description: The team that shared it (only on items that aren't yours).
+        media:
+          type: string
+          enum:
+            - image
+            - video
+            - audio
+        inputs:
+          type: array
+          items:
+            type: object
+            required:
+              - id
+              - media
+              - multiple
+              - required
+            properties:
+              id:
+                type: string
+              label:
+                type: string
+              media:
+                type: string
+                enum:
+                  - image
+                  - video
+                  - audio
+                  - text
+              multiple:
+                type: boolean
+              required:
+                type: boolean
+                description: No material was saved for it, so a run must give one.
+        steps:
+          type: integer
+        currency:
+          type: string
+          const: USD
+        estimated_usd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Optional exact USD estimate; omitted when unavailable. Not an execution approval.
+        prompt:
+          type: string
+          description: Only for your own recipes.
+        updatedAt:
+          type: string
+          format: date-time
+    SavedUSDRun:
+      type: object
+      required:
+        - currency
+        - cost_usd
+        - available_usd
+        - spent_usd
+        - needs_confirmation
+      properties:
+        currency:
+          type: string
+          const: USD
+        cost_usd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Quoted steps total, incomplete when unpriced_steps is present. Resume quotes include committed amounts plus remaining steps. Status reads report current step estimates.
+        available_usd:
+          type: string
+          pattern: "^-?[0-9]+(\\.[0-9]{1,9})?$"
+          description: Independent API wallet available balance.
+        spent_usd:
+          type: string
+          pattern: "^-?[0-9]+(\\.[0-9]{1,9})?$"
+          description: Net actual charge from the original API payer ledger on status reads; zero in quote/start responses.
+        max_usd:
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,9})?$"
+          description: Approved total budget, when present.
+        quote_id:
+          type: string
+          description: Fingerprint binding steps, inputs, prices and original identity.
+        needs_confirmation:
+          type: boolean
+        unpriced_steps:
+          type: array
+          items:
+            type: string
+          description: Step IDs not yet priceable because required dependency outputs are missing. These steps cannot run; zero is not a free price.
+        run_id:
+          type: string
+        state:
+          type: string
+          enum:
+            - draft
+            - running
+            - paused
+            - done
+            - stopped
+            - failed
+        pause_reason:
+          type: string
+        items:
+          type: array
+          items:
+            type: object
+            required:
+              - stepId
+              - state
+            properties:
+              stepId:
+                type: string
+              state:
+                type: string
+              jobId:
+                type: string
+              uri:
+                type: string
+    SavedSkill:
+      type: object
+      required:
+        - id
+        - name
+        - description
+        - mine
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        mine:
+          type: boolean
+        shareMode:
+          type: string
+          enum:
+            - use
+            - view
+        body:
+          type: string
+    AgentSkill:
+      type: object
+      required:
+        - slug
+        - name
+        - summary
+        - bestFor
+        - type
+        - tasks
+        - popnow
+        - popnowRequired
+        - requires
+        - version
+        - updated
+        - url
+        - preview
+        - distribution
+      properties:
+        slug:
+          type: string
+        name:
+          type: string
+        summary:
+          type: string
+        bestFor:
+          type: array
+          items:
+            type: string
+        type:
+          type: string
+          enum:
+            - video
+            - image
+            - slides
+            - web
+        tasks:
+          type: array
+          items:
+            type: string
+        popnow:
+          type: array
+          description: Media the skill can generate through PopNow (each run is quoted first).
+          items:
+            type: string
+            enum:
+              - image
+              - video
+              - audio
+        popnowRequired:
+          type: boolean
+          description: True when the skill can't finish without PopNow generation; false when those steps are optional.
+        requires:
+          type: array
+          description: Tools the skill runs on the user's machine, for example python3, node, ffmpeg or chrome.
+          items:
+            type: string
+        version:
+          type: string
+        updated:
+          type: string
+          format: date
+        url:
+          type: string
+          format: uri
+          description: The skill's page on popnow.ai.
+        preview:
+          type:
+            - object
+            - "null"
+          properties:
+            video:
+              type: string
+              format: uri
+            image:
+              type: string
+              format: uri
+        distribution:
+          type: string
+          enum:
+            - popnow
+            - github
+          description: "`popnow` packages download from this API; `github` ones are open source (see `repo`)."
+        repo:
+          type: string
+          format: uri
+    AgentSkillDetail:
+      allOf:
+        - $ref: "#/components/schemas/AgentSkill"
+        - type: object
+          required:
+            - install
+          properties:
+            install:
+              type: object
+              required:
+                - folder
+                - prompt
+                - guide
+                - agents
+              properties:
+                folder:
+                  type: string
+                  description: The single folder inside the package, popnow-<slug>.
+                downloadPath:
+                  type: string
+                  description: Path of the download endpoint (absent for open-source skills).
+                downloadUrl:
+                  type: string
+                  format: uri
+                prompt:
+                  type: string
+                  description: A sentence to paste into an agent so it installs the skill itself.
+                guide:
+                  type: string
+                  format: uri
+                  description: Install steps written for agents.
+                agents:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - id
+                      - name
+                      - personalDir
+                      - projectDir
+                      - invoke
+                      - docs
+                      - command
+                    properties:
+                      id:
+                        type: string
+                        enum:
+                          - claude-code
+                          - codex
+                          - cursor
+                          - gemini-cli
+                          - github-copilot
+                          - windsurf
+                          - openclaw
+                          - antigravity
+                          - opencode
+                          - hermes-agent
+                          - kimi-code
+                          - kiro
+                          - trae
+                          - qoder
+                          - qwen-code
+                          - cline
+                          - roo-code
+                          - kilo-code
+                          - amp
+                          - zed
+                          - warp
+                          - goose
+                          - junie
+                          - codebuddy
+                          - openhands
+                          - devin
+                          - minimax-code
+                          - mistral-vibe
+                      name:
+                        type: string
+                      personalDir:
+                        type: string
+                        description: Skills folder for every project.
+                      projectDir:
+                        type: string
+                        description: Skills folder for the current repository only.
+                      invoke:
+                        type: string
+                        description: How to call the skill in a chat with that agent.
+                      docs:
+                        type: string
+                        format: uri
+                      command:
+                        type: string
+                        description: Shell command that installs the skill into personalDir.
