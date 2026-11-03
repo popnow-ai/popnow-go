@@ -12,6 +12,7 @@ import (
 // string; units, tier conditions and token thresholds keep their meaning. It
 // is a rate snapshot: Quote gives the authoritative amount of one request.
 type ModelUsd struct {
+	PerMillionTokens json.RawMessage `json:"perMillionTokens,omitempty"`
 	// Unit is how the price scales: per_image, per_second, per_request, ...
 	// Treat it as open.
 	Unit string `json:"unit"`

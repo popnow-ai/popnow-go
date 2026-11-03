@@ -47,7 +47,7 @@ import (
 // Keep it equal to the git tag it ships under, without the leading v. A tagged
 // module exposes its version only to the programs that depend on it, never to
 // itself, so nothing can read it back at run time.
-const Version = "0.2.0"
+const Version = "0.3.0"
 
 // UserAgent identifies this client on every API request.
 //

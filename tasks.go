@@ -382,7 +382,20 @@ type AssetLayer struct {
 //
 // Not every endpoint produces files. Transcription answers in Text and returns
 // no assets, so check what you actually got before reaching for Assets[0].
+// EmbeddingVector preserves one vector and its input index.
+type EmbeddingVector struct {
+	Index     int       `json:"index"`
+	Embedding []float64 `json:"embedding"`
+}
+
+// EmbeddingBatch includes measured input usage from the same task.
+type EmbeddingBatch struct {
+	Data        []EmbeddingVector `json:"data"`
+	InputTokens int64             `json:"inputTokens"`
+}
+
 type TaskOutput struct {
+	Embeddings *EmbeddingBatch `json:"embeddings,omitempty"`
 	// Text is the plain-text result. For a multichannel transcription it holds
 	// one line per channel, in channel order.
 	Text string `json:"text,omitempty"`

@@ -1526,6 +1526,219 @@ paths:
           $ref: "#/components/responses/OpenAIError"
         "503":
           $ref: "#/components/responses/OpenAIError"
+  /v1/embeddings:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: createEmbedding
+      summary: Create vectors with an embedding model
+      description: |
+        Uses the normal task admission, idempotency, routing and settlement pipeline.
+        Waits up to two minutes for the accepted task to settle. The task ID is
+        returned in X-PopNow-Task-Id; after a timeout retrieve that task or retry with
+        the same Idempotency-Key. No second settlement path is used.
+        Each request accepts up to 128 inputs. The model page declares token and
+        dimension limits. Base64 output contains little-endian float32 values.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - model
+                - input
+              properties:
+                model:
+                  type: string
+                  description: Public embedding model or endpoint ID.
+                input:
+                  oneOf:
+                    - type: string
+                      minLength: 1
+                    - type: array
+                      items:
+                        type: string
+                        minLength: 1
+                      minItems: 1
+                      maxItems: 128
+                    - type: array
+                      items:
+                        type: integer
+                        minimum: 0
+                        maximum: 2147483647
+                      minItems: 1
+                      maxItems: 2048
+                    - type: array
+                      items:
+                        type: array
+                        items:
+                          type: integer
+                          minimum: 0
+                          maximum: 2147483647
+                        minItems: 1
+                        maxItems: 2048
+                      minItems: 1
+                      maxItems: 128
+                dimensions:
+                  type: integer
+                  minimum: 1
+                encoding_format:
+                  type: string
+                  enum:
+                    - float
+                    - base64
+                  default: float
+                user:
+                  type: string
+                  description: Accepted for SDK compatibility; not forwarded.
+      responses:
+        "200":
+          description: Embedding vectors in input order, with measured usage.
+          headers:
+            X-PopNow-Task-Id:
+              $ref: "#/components/headers/PopNowTaskId"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  object:
+                    type: string
+                    const: list
+                  model:
+                    type: string
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        object:
+                          type: string
+                          const: embedding
+                        index:
+                          type: integer
+                          minimum: 0
+                        embedding:
+                          oneOf:
+                            - type: array
+                              items:
+                                type: number
+                            - type: string
+                              contentEncoding: base64
+                  usage:
+                    type: object
+                    properties:
+                      prompt_tokens:
+                        type: integer
+                      total_tokens:
+                        type: integer
+        "400":
+          $ref: "#/components/responses/OpenAIError"
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "402":
+          $ref: "#/components/responses/OpenAIError"
+        "403":
+          $ref: "#/components/responses/OpenAIError"
+        "404":
+          $ref: "#/components/responses/OpenAIError"
+        "409":
+          $ref: "#/components/responses/OpenAIError"
+        "413":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "500":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
+  /v1/audio/speech:
+    post:
+      tags:
+        - OpenAI Compatible
+      operationId: createSpeech
+      summary: Generate speech as an audio file
+      description: |
+        Uses the normal task admission, idempotency, pricing and settlement pipeline.
+        Returns the stored audio bytes only after successful settlement, with no JSON
+        wrapper or keepalive bytes. Waits up to two minutes. A timeout does not create
+        another task: retry using the same Idempotency-Key or retrieve X-PopNow-Task-Id.
+        Supported voices, formats and additional instructions depend on the selected
+        text-to-speech model's public schema. Binary audio output is supported here.
+        Stored audio is limited to 32 MiB per response; split long, slow uncompressed
+        narration into shorter requests.
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+                - model
+                - input
+                - voice
+              properties:
+                model:
+                  type: string
+                  description: Public text-to-speech model or endpoint ID.
+                input:
+                  type: string
+                  minLength: 1
+                  maxLength: 4096
+                voice:
+                  type: string
+                response_format:
+                  type: string
+                  enum:
+                    - mp3
+                    - opus
+                    - aac
+                    - flac
+                    - wav
+                    - pcm
+                  default: mp3
+                speed:
+                  type: number
+                  minimum: 0.25
+                  maximum: 4
+                  default: 1
+                instructions:
+                  type: string
+                  description: Accepted only when present in the selected model schema.
+                stream_format:
+                  type: string
+                  enum:
+                    - audio
+                  default: audio
+                user:
+                  type: string
+                  description: Accepted for SDK compatibility; not forwarded.
+      responses:
+        "200":
+          description: Audio bytes, read from the authenticated task's stored output.
+          headers:
+            X-PopNow-Task-Id:
+              $ref: "#/components/headers/PopNowTaskId"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/OpenAIError"
+        "401":
+          $ref: "#/components/responses/OpenAIError"
+        "429":
+          $ref: "#/components/responses/OpenAIError"
+        "503":
+          $ref: "#/components/responses/OpenAIError"
   /v1/messages:
     post:
       tags:
@@ -2960,15 +3173,31 @@ components:
             - circlestone-labs/anima-turbo-lora/text-to-image
             - circlestone-labs/anima-turbo/edit
             - circlestone-labs/anima-turbo/text-to-image
+            - comfyui/openjutsu-character-swap/video-edit
+            - comfyui/openjutsu-object-swap/video-edit
             - google/gemini-2.5-pro-tts/text-to-speech
             - google/gemini-3.8-flash-lite-tts/text-to-speech
             - google/gemini-3.8-flash-tts/text-to-speech
+            - google/gemini-omni-1.1-flash/image-to-video
+            - google/gemini-omni-1.1-flash/reference-to-video
+            - google/gemini-omni-1.1-flash/text-to-video
             - google/nano-banana-2.1/edit
             - google/nano-banana-2.1/text-to-image
             - google/nano-banana-2/edit
             - google/nano-banana-2/text-to-image
             - google/nano-banana-pro/edit
             - google/nano-banana-pro/text-to-image
+            - google/veo-3.1-fast/image-to-video
+            - google/veo-3.1-fast/reference-to-video
+            - google/veo-3.1-fast/text-to-video
+            - google/veo-3.1-fast/video-extend
+            - google/veo-3.1-lite/image-to-video
+            - google/veo-3.1-lite/reference-to-video
+            - google/veo-3.1-lite/text-to-video
+            - google/veo-3.1-lite/video-extend
+            - google/veo-3.1/image-to-video
+            - google/veo-3.1/text-to-video
+            - google/veo-3.1/video-extend
             - heartmula/transcribe/speech-to-text
             - ideogram/vector-1/edit
             - ideogram/vector-1/text-to-image
@@ -3048,12 +3277,23 @@ components:
             - minimax/speech-2.8-hd/text-to-speech
             - minimax/speech-2.8-turbo/text-to-speech
             - neta-art/neta-lumina/text-to-image
+            - openai/gpt-4o-mini-transcribe/speech-to-text
+            - openai/gpt-4o-transcribe-diarize/speech-to-text
+            - openai/gpt-4o-transcribe/speech-to-text
             - openai/gpt-image-2.5-flare/edit
             - openai/gpt-image-2.5-flare/text-to-image
             - openai/gpt-image-2.5-sunburst/edit
             - openai/gpt-image-2.5-sunburst/text-to-image
             - openai/gpt-image-2/edit
             - openai/gpt-image-2/text-to-image
+            - openai/gpt-live-transcribe/realtime-transcription
+            - openai/gpt-realtime-2.1-mini/realtime
+            - openai/gpt-realtime-2.1/realtime
+            - openai/gpt-transcribe/realtime-transcription
+            - openai/gpt-transcribe/speech-to-text
+            - openai/tts-1-hd/text-to-speech
+            - openai/tts-1/text-to-speech
+            - openai/whisper-1/speech-to-text
             - openmoss/moss-image-lora/text-to-image
             - openmoss/moss-image/text-to-image
             - pixverse/v6-effects/image-to-video
@@ -3101,6 +3341,7 @@ components:
             - pruna-ai/p-image-lora/text-to-image
             - pruna-ai/p-video-2-pro/image-to-video
             - pruna-ai/p-video-2-pro/reference-to-video
+            - pruna-ai/p-video-2-pro/talking-avatar
             - pruna-ai/p-video-2-pro/text-to-video
             - recraft/20b-svg/text-to-image
             - recraft/v4-vector/text-to-image
@@ -3112,8 +3353,17 @@ components:
             - suno/v6/text-to-audio
             - tencent/hunyuan-video-1.5/image-to-video
             - tencent/hunyuan-video-1.5/text-to-video
+            - topaz/astra/upscale
+            - topaz/bloom/upscale
             - topaz/denoise-sharpen/edit
+            - topaz/gigapixel/upscale
+            - topaz/starlight/upscale
+            - topaz/video-ai/frame-interpolation
+            - topaz/video-ai/upscale
+            - topaz/video-ai/video-edit
             - tripo/h3.1/image-to-3d
+            - tripo/h3.1/text-to-3d
+            - tripo/p1/image-to-3d
             - veed/dubbing-pro/video-translate
             - veed/dubbing/video-translate
             - vidu/q3-pro/image-to-video
@@ -3381,6 +3631,34 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/TaskOutputAsset"
+        embeddings:
+          type: object
+          required:
+            - data
+            - inputTokens
+          properties:
+            inputTokens:
+              type: integer
+              minimum: 1
+            data:
+              type: array
+              minItems: 1
+              maxItems: 128
+              items:
+                type: object
+                required:
+                  - index
+                  - embedding
+                properties:
+                  index:
+                    type: integer
+                    minimum: 0
+                  embedding:
+                    type: array
+                    minItems: 1
+                    maxItems: 3072
+                    items:
+                      type: number
     TaskTranscript:
       type: object
       description: Structured transcription result, present only on speech-to-text endpoints that return it. `text` above stays the plain transcript; this object adds timing and language details. Erased together with the rest of the task output on the prompt-retention schedule.
@@ -4172,6 +4450,10 @@ components:
                     type: string
                   unit:
                     type: string
+            perMillionTokens:
+              type: object
+              additionalProperties: true
+              description: Exact decimal USD rates per million tokens, including text, audio and image components when available.
             currency:
               type: string
               enum:
@@ -5144,6 +5426,10 @@ components:
                           type: string
                         unit:
                           type: string
+                  perMillionTokens:
+                    type: object
+                    additionalProperties: true
+                    description: Exact decimal USD rates per million tokens, including text, audio and image components when available.
                   currency:
                     type: string
                     enum:

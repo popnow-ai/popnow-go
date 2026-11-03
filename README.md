@@ -414,3 +414,9 @@ Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). To
 ## License
 
 [MIT](LICENSE) © PopNow
+
+## Model catalog update — 2026-11-03
+
+Model IDs and input fields come from the live PopNow catalog. This release covers the new GPT chat families, Gemini Omni and Veo 3.1 video variants, GPT/Whisper transcription, TTS-1/HD, realtime voice task models, and the updated Tripo, Topaz and editing models. Fetch the selected model schema before submitting; use the normal quote, create and poll flow for task models.
+
+Embedding tasks return `output.embeddings.data` (input `index` plus the numeric `embedding`) and measured `output.embeddings.inputTokens`, with no media files required. OpenAI-compatible embeddings use `POST /v1/embeddings`; binary speech uses `POST /v1/audio/speech`. The API wallet and quotes are in USD.
