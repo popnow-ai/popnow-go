@@ -3,7 +3,7 @@
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/popnow-ai/popnow-go/main/assets/popnow-wordmark-light.png">
       <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/popnow-ai/popnow-go/main/assets/popnow-wordmark.png">
-      <img alt="PopNow" src="https://raw.githubusercontent.com/popnow-ai/popnow-go/main/assets/popnow-wordmark.png" width="260">
+      <img alt="PopNow AI" src="https://raw.githubusercontent.com/popnow-ai/popnow-go/main/assets/popnow-wordmark.png" width="260">
     </picture>
   </a>
 
@@ -21,7 +21,9 @@
   </p>
 </div>
 
-PopNow is a browser-based AI studio for videos, images and music: image-to-video, text-to-video, AI images, music and speech, one-tap trending video effects and image styles. This package wraps its developer API (`https://api.popnow.ai/api/v1`) so you can call Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux, Suno and more from Go. Pay per call in USD from your [API balance](https://popnow.ai/docs/billing), no subscription; failed or expired tasks release their hold in full. *Make it pop.*
+PopNow AI ([popnow.ai](https://popnow.ai)) is the world's first AI creative studio that pays you back, a browser-based studio for videos, images and music: image-to-video, text-to-video, AI images, music and speech, one-tap trending video effects and image styles. This package wraps its developer API (`https://api.popnow.ai/api/v1`) so you can call Kling, Seedance, Wan, Vidu, MiniMax, Nano Banana, GPT Image, Flux, Suno and more from Go. Pay per call in USD from your [API balance](https://popnow.ai/docs/billing), no subscription; failed or expired tasks release their hold in full. *Make it pop.*
+
+Every API call is quoted in USD before it runs, and failed tasks are refunded to your API balance automatically.
 
 - **Standard library only.** Go 1.23+, no third-party modules in your dependency graph.
 - **Safe retries.** Back-off with jitter on `429` / `500` / `503`, honouring `Retry-After`, and only for requests that cannot charge twice: task submissions require an `Idempotency-Key`.
